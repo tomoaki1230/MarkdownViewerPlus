@@ -38,7 +38,8 @@ export function buildMenu(ui, settings, actions) {
     {
       label: 'ファイル(&F)',
       submenu: [
-        { label: '新しいウィンドウ(&N)', ...key('Ctrl+N'), click: actions.newWindow },
+        // 空のウィンドウ（既に新しいウィンドウの状態）では使えない（空のウィンドウは 1 つだけ）
+        { label: '新しいウィンドウ(&N)', ...key('Ctrl+N'), enabled: ui.hasDoc, click: actions.newWindow },
         { label: '開く(&O)...', ...key('Ctrl+O'), click: cmd('open') },
         { label: '最近開いたファイル(&R)', submenu: recentSubmenu(settings.recent, actions) },
         { type: 'separator' },

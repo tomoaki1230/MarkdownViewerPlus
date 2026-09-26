@@ -3,10 +3,12 @@
 //   boot.bundle.js … テーマの色を最初の描画より前に当てる小さなスクリプト（<head> で同期実行）
 //   app.bundle.js  … marked / DOMPurify / 絵文字 / アプリ本体（起動時に読み込む）
 //   hljs.bundle.js … highlight.js（本文を描画した後に遅延ロード）
+// あわせて、assets/icon.png から複数サイズ入りの dist/icon.ico を作る（Windows のウィンドウ・トレイ・exe のアイコン）
 import * as esbuild from 'esbuild';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { makeIco } from './icon.mjs';
 
 const root = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
 const src = path.join(root, 'src', 'renderer');
@@ -114,6 +116,7 @@ const entries = [
 
 copyStatic();
 writeThirdPartyLicenses();
+fs.writeFileSync(path.join(root, 'dist', 'icon.ico'), makeIco(fs.readFileSync(path.join(root, 'assets', 'icon.png'))));
 if (watch) {
   for (const e of entries) {
     const ctx = await esbuild.context({ ...common, ...e });

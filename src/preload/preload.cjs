@@ -37,6 +37,8 @@ contextBridge.exposeInMainWorld('mvp', {
   // カラーテーマの選択（scheme: 'light' / 'dark'）
   setPalette: (scheme, id) => ipcRenderer.send('theme:set-palette', String(scheme), String(id)),
   quit: () => ipcRenderer.send('app:quit'),
+  // ウィンドウを閉じる（main の close を通し、未保存なら確認を出す。window.close() は確認を通らずに閉じてしまう）
+  closeWindow: () => ipcRenderer.send('app:close-window'),
   newWindow: () => ipcRenderer.send('app:new-window'),
   // サードパーティのライセンス一覧の文章
   getLicenses: () => ipcRenderer.invoke('app:licenses'),

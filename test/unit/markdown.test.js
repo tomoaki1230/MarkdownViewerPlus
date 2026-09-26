@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import createDOMPurify from 'dompurify';
 import { JSDOM } from 'jsdom';
-import { createMarkdownRenderer } from '../../src/renderer/markdown.js';
+import { CHUNK_CHARS, CHUNK_LINES, createMarkdownRenderer } from '../../src/renderer/markdown.js';
 
 const { window } = new JSDOM('');
 const md = createMarkdownRenderer({ DOMPurify: createDOMPurify(window) });
@@ -116,4 +116,48 @@ test('改行で折り返す: オンなら段落内の改行が <br> になり、
     md.setBreaks(false);
   }
   assert.equal(dom(md.render(src)).querySelectorAll('br').length, 1, '元に戻る');
+});
+
+test('巨大な段落は塊に分けて描画し、文字・強調・リンクは失わず、塊には元の行番号を付ける', () => {
+  // 1 行ごとに強調とリンクが改行をまたぐ（強調・リンクの途中では分けない）
+  const row = (i) => `行${i} **太字\n続き** [リンク\n先](http://a/)`;
+  const rows = 250;
+  const src = `# 見出し\n\n${Array.from({ length: rows }, (_, i) => row(i)).join('\n')}\n\n後ろ\n`;
+  const d = dom(md.render(src));
+  const p = d.querySelector('p');
+  const chunks = [...p.querySelectorAll(':scope > span.md-chunk')];
+  assert.ok(chunks.length > 1, '分けられている');
+  assert.equal(p.querySelectorAll('strong').length, rows);
+  assert.equal(p.querySelectorAll('a').length, rows);
+  // 元の段落と同じ文字（境目の改行を除く）
+  const plain = Array.from({ length: rows }, (_, i) => `行${i} 太字続き リンク先`).join('');
+  assert.equal(p.textContent.replace(/[\s\n]/g, ''), plain.replace(/\s/g, ''));
+  // 塊の data-line は、その塊の先頭のソース行
+  const lines = src.split('\n');
+  for (const c of chunks.slice(1)) {
+    const line = Number(c.dataset.line);
+    assert.equal(lines[line].split(' ')[0], c.textContent.split(' ')[0], `data-line=${line}`);
+  }
+  // 塊の大きさは上限の範囲（強調等をまたぐ分だけ少し超え得る）
+  for (const c of chunks) assert.ok(c.textContent.split('\n').length <= CHUNK_LINES + 3);
+});
+
+test('小さい段落・改行の無い長文・改行して表示する設定での塊', () => {
+  assert.equal(dom(md.render('a\nb\nc')).querySelector('.md-chunk'), null, '小さい段落は分けない');
+  // 改行の無い長文は文字数で区切る（サロゲートペアを壊さない）
+  const long = 'あ'.repeat(CHUNK_CHARS * 2 + 1) + '😀'.repeat(CHUNK_CHARS);
+  const d = dom(md.render(long));
+  assert.ok(d.querySelectorAll('.md-chunk').length >= 4);
+  assert.equal(d.querySelector('p').textContent, long);
+  // 改行して表示する設定: 塊の境目の改行は <br> の代わり（<br> と境目の合計は元の改行の数）
+  md.setBreaks(true);
+  try {
+    const text = Array.from({ length: CHUNK_LINES * 3 }, (_, i) => `行${i}`).join('\n');
+    const p = dom(md.render(text)).querySelector('p');
+    const chunks = p.querySelectorAll('.md-chunk').length;
+    assert.ok(chunks > 1);
+    assert.equal(p.querySelectorAll('br').length + chunks - 1, CHUNK_LINES * 3 - 1);
+  } finally {
+    md.setBreaks(false);
+  }
 });

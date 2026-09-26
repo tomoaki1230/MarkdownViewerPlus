@@ -167,7 +167,9 @@ article.addEventListener('click', (e) => {
   const a = e.target.closest('a[href]');
   if (!a) return;
   e.preventDefault();
-  const href = a.getAttribute('href');
+  const href = a.getAttribute('href').trim();
+  // 空のリンク（[文字]() など）は何もしない（文書のフォルダを開いてしまわないように）
+  if (href === '') return;
   if (href.startsWith('#')) {
     const id = decodeURIComponent(href.slice(1));
     const target = shadow.getElementById(id) ?? article.querySelector(`[name="${CSS.escape(id)}"]`);
@@ -279,6 +281,15 @@ document.addEventListener('selectionchange', () => {
   if (document.activeElement === els.textarea) updateCaretStatus();
 });
 
+// スクロールバーの上では通常の矢印カーソルにする（見た目を変えたスクロールバーでは、Chromium が
+// 入力欄の I 字カーソルをそのまま出してしまうため）。ドラッグ中は押した時点のカーソルが続く
+els.textarea.addEventListener('mousemove', (e) => {
+  const onScrollbar = e.offsetX >= els.textarea.clientWidth;
+  const cursor = onScrollbar ? 'default' : '';
+  if (els.textarea.style.cursor !== cursor) els.textarea.style.cursor = cursor;
+});
+els.textarea.addEventListener('mouseleave', () => (els.textarea.style.cursor = ''));
+
 // Tab はフォーカス移動ではなくタブ文字の入力にする
 els.textarea.addEventListener('keydown', (e) => {
   if (e.key === 'Tab' && !e.ctrlKey && !e.altKey && !e.shiftKey && !e.isComposing) {
@@ -306,6 +317,7 @@ function setMode(mode, { keepScroll = true } = {}) {
   els.stMode.textContent = MODE_LABELS[mode];
   notifyUiState();
   for (const b of els.modeButtons) b.setAttribute('aria-pressed', String(b.dataset.mode === mode));
+  updatePreviewOnlyButtons(mode);
 
   if (mode !== 'edit') renderPreview();
   state.anchors = null;
@@ -898,6 +910,12 @@ function setDocControlsEnabled(enabled) {
   ]) {
     b.disabled = !enabled;
   }
+  if (enabled) updatePreviewOnlyButtons(state.mode);
+}
+
+// 改行で折り返す・表示幅はプレビューだけの設定なので、プレビューを出さない編集モードでは使えない
+function updatePreviewOnlyButtons(mode) {
+  for (const b of [els.btnBreaks, els.btnWidth]) b.disabled = mode === 'edit';
 }
 
 function loadDocument(payload) {
@@ -1015,8 +1033,14 @@ function applySaveResult(result, text) {
 
 els.btnSave.addEventListener('click', save);
 els.btnSaveAs.addEventListener('click', saveAs);
-// 手動の再読み込み（編集中なら main が破棄してよいか確認する）
-els.btnReload.addEventListener('click', () => api.reloadFromDisk());
+// 手動の再読み込み（編集中なら main が破棄してよいか確認する）。読み込めなかったときは理由を知らせる
+async function reloadFromDisk(confirmed = false) {
+  const result = await api.reloadFromDisk(confirmed);
+  if (result && !result.ok && !result.canceled && result.error) {
+    showBanner(`ファイルを読み込めませんでした（${result.error}）。表示しているのは前に読み込んだ内容です。`);
+  }
+}
+els.btnReload.addEventListener('click', () => reloadFromDisk());
 els.btnAutoReload.addEventListener('click', () => api.setSetting('autoReload', !appSettings.autoReload));
 els.btnBreaks.addEventListener('click', () => api.setSetting('breaks', !appSettings.breaks));
 els.btnWidth.addEventListener('click', () => api.widthMenu());
@@ -1229,7 +1253,7 @@ function hideBanner() {
   els.banner.hidden = true;
 }
 // 通知バナーの「再読み込み」は、編集中の内容が失われる旨をバナーで伝えているので確認済みとして扱う
-els.bannerReload.addEventListener('click', () => api.reloadFromDisk(true));
+els.bannerReload.addEventListener('click', () => reloadFromDisk(true));
 els.bannerClose.addEventListener('click', hideBanner);
 
 let messageTimer = null;
@@ -1300,13 +1324,14 @@ window.addEventListener('keydown', (e) => {
   const editing = state.doc && state.mode !== 'view';
 
   if (ctrl && e.shiftKey && !e.altKey && key === 's') return prevent(e, saveAs);
-  if (e.key === 'F5' && !ctrl && !e.altKey) return prevent(e, () => state.doc && api.reloadFromDisk());
+  if (e.key === 'F5' && !ctrl && !e.altKey) return prevent(e, () => state.doc && reloadFromDisk());
   if (ctrl && !e.shiftKey && !e.altKey) {
     if (key === 's') return prevent(e, save);
     if (key === 'o') return prevent(e, () => api.openDialog());
-    if (key === 'w') return prevent(e, () => window.close());
+    if (key === 'w') return prevent(e, () => api.closeWindow());
     if (key === 'q') return prevent(e, () => api.quit());
-    if (key === 'n') return prevent(e, () => api.newWindow());
+    // メニューと同じく、空のウィンドウでは何もしない
+    if (key === 'n') return prevent(e, () => state.doc && api.newWindow());
     if (key === ',') return prevent(e, openSettings);
     if (key === '1') return prevent(e, () => setMode('view'));
     if (key === '2') return prevent(e, () => setMode('edit'));
@@ -1374,8 +1399,8 @@ const MENU_COMMANDS = {
   'theme-picker': () => themePicker.open(themeState),
   open: () => api.openDialog(),
   save,
-  reload: () => api.reloadFromDisk(),
-  close: () => window.close(),
+  reload: () => reloadFromDisk(),
+  close: () => api.closeWindow(),
   undo: () => state.mode !== 'view' && ACTIONS.undo(),
   redo: () => state.mode !== 'view' && ACTIONS.redo(),
   find: () => openSearch(),
@@ -1393,7 +1418,11 @@ api.onEmpty(() => {
   updateTitle();
   api.rendered();
 });
-api.onExternalChanged(({ missing, dirty }) => {
+api.onExternalChanged(({ missing, dirty, unreadable }) => {
+  if (unreadable) {
+    showBanner(`このファイルは外部で変更されましたが、読み込めませんでした（${unreadable}）。表示しているのは変更前の内容です。`);
+    return;
+  }
   if (missing) showBanner('このファイルは外部で削除（または移動）されました。保存すると同じ場所に作り直します。', { reload: false });
   else if (dirty) showBanner('このファイルは外部で変更されました。再読み込みすると編集中の内容は失われます。');
   else showBanner('このファイルは外部で変更されました（自動再読み込みはオフです）。');

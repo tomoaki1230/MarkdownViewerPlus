@@ -1,17 +1,47 @@
 // 上書き保存の安全確認と、ユーザーのファイルを壊さない書き込み
 // ・読み取り専用のファイルには書き込まない（書き込み禁止を外して上書きすることもしない）
 // ・外部変更・削除・ハードリンク・シンボリックリンクは、上書き前に確認する
+//   外部変更は更新日時・サイズに加え、上書きの直前には中身（ハッシュ）でも確かめる（同じ大きさ・同じ時刻の変更も見逃さない）
+// ・読み込みは「読む前の状態」を記録する（書き込み途中を読んでも、その後の変化を必ず検知できるように）
 // ・書き込みは「実体への上書き」（リネーム方式を使わないので、ハードリンク・シンボリックリンク・属性を保つ）。
 //   途中で失敗してもファイルを壊さないよう、元の内容の控えを取り、書き込み後に読み戻して照合し、失敗したら元に戻す
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 
+function hashBytes(bytes) {
+  return crypto.createHash('sha256').update(bytes).digest('hex');
+}
+
 /**
  * 読み込み時点のファイル状態を記録する
+ * @param {string} filePath
+ * @param {Buffer} [bytes] そのとき読んだ（書いた）中身。渡すと上書き前に中身でも外部変更を確かめる
  */
-export function snapshotStat(filePath) {
+export function snapshotStat(filePath, bytes) {
   const st = fs.statSync(filePath);
-  return { mtimeMs: st.mtimeMs, size: st.size };
+  return { mtimeMs: st.mtimeMs, size: st.size, ...(bytes ? { hash: hashBytes(bytes) } : {}) };
+}
+
+/**
+ * 他のソフトが書き込んでいる途中でも、ちぐはぐな状態を記録しないように読む。
+ * 状態（更新日時・サイズ）は**読む前**に取る。読んだ後の状態と食い違えば（書き込み途中）読み直す。
+ * 何度読んでも落ち着かなければ、最後に読んだ中身を「読む前の状態」とともに返す。
+ * 記録した状態は実際より古いので、書き込みが終わった後の変化として必ず検知され、読み直し・保存時の確認につながる
+ * （読んだ後の状態を記録すると、書き込み途中の中身のまま変化を見逃し、保存で外部の内容を上書きしてしまう）
+ * @returns {{bytes: Buffer, snapshot: {mtimeMs: number, size: number, hash: string}, stable: boolean}}
+ */
+export function readStable(filePath, { retries = 3 } = {}) {
+  let result;
+  for (let i = 0; i <= retries; i++) {
+    const before = fs.statSync(filePath);
+    const bytes = fs.readFileSync(filePath);
+    const after = fs.statSync(filePath);
+    const stable = before.mtimeMs === after.mtimeMs && before.size === after.size && bytes.length === after.size;
+    result = { bytes, snapshot: { mtimeMs: before.mtimeMs, size: before.size, hash: hashBytes(bytes) }, stable };
+    if (stable) break;
+  }
+  return result;
 }
 
 /** 書き込めるか（Windows の読み取り専用属性・アクセス権を含む） */
@@ -48,12 +78,20 @@ export function checkExternalChange(filePath, snapshot) {
  */
 export function inspectBeforeOverwrite(filePath, snapshot) {
   const warnings = [];
-  const change = snapshot ? checkExternalChange(filePath, snapshot) : fs.existsSync(filePath) ? 'unchanged' : 'missing';
+  let change = snapshot ? checkExternalChange(filePath, snapshot) : fs.existsSync(filePath) ? 'unchanged' : 'missing';
   if (change === 'missing') {
     warnings.push('ファイルが外部で削除（または移動）されています。保存すると同じ場所に作り直します。');
     return { warnings, readOnly: false, missing: true };
   }
   if (!isWritable(filePath)) return { warnings, readOnly: true, missing: false };
+  // 更新日時・サイズが同じでも、中身が変わっていれば外部変更とみなす（時刻の刻みが粗い場所・同じ文字数の修正）
+  if (change === 'unchanged' && snapshot?.hash) {
+    try {
+      if (hashBytes(fs.readFileSync(filePath)) !== snapshot.hash) change = 'changed';
+    } catch {
+      // 読めない場合は後の書き込みで失敗として扱われる
+    }
+  }
   if (change === 'changed') {
     warnings.push('ファイルが開いた後に外部で変更されています。保存すると外部の変更は失われます。');
   }

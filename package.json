@@ -47,6 +47,7 @@
       "src/preload/**/*",
       "src/shared/**/*",
       "dist/renderer/**/*",
+      "dist/icon.ico",
       "assets/**/*",
       "package.json"
     ],
@@ -65,7 +66,7 @@
       }
     ],
     "win": {
-      "icon": "assets/icon.png",
+      "icon": "dist/icon.ico",
       "target": [
         {
           "target": "nsis",

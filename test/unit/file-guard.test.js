@@ -2,9 +2,9 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
-import { after, before, test } from 'node:test';
+import { after, before, mock, test } from 'node:test';
 import { fileURLToPath } from 'node:url';
-import { checkExternalChange, inspectBeforeOverwrite, safeWriteFile, snapshotStat } from '../../src/main/file-guard.js';
+import { checkExternalChange, inspectBeforeOverwrite, readStable, safeWriteFile, snapshotStat } from '../../src/main/file-guard.js';
 
 const root = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
 const dir = path.join(root, 'temp', `test-file-guard-${process.pid}`);
@@ -100,4 +100,67 @@ test('シンボリックリンクを検出し、リンク自体は置き換え�
   safeWriteFile(link, Buffer.from('new'), { recoveryDir });
   assert.ok(fs.lstatSync(link).isSymbolicLink());
   assert.equal(fs.readFileSync(target, 'utf8'), 'new');
+});
+
+test('読み込み: 書き込み途中を読んだら読み直し、落ち着いた中身と「読む前の状態」を記録する', () => {
+  const p = makeFile('writing.md', '完全な内容です。\n'.repeat(10));
+  const full = fs.readFileSync(p);
+  const real = fs.readFileSync;
+  let calls = 0;
+  // 1 回目の読み込みは「途中まで書かれた状態」を返し、その直後に書き込みが完了する
+  const m = mock.method(fs, 'readFileSync', (file, ...rest) => {
+    if (file !== p) return real(file, ...rest);
+    calls++;
+    if (calls === 1) {
+      const partial = full.subarray(0, 10);
+      fs.writeFileSync(p, Buffer.concat([full, Buffer.from('追記\n')]));
+      return partial;
+    }
+    return real(file, ...rest);
+  });
+  try {
+    const r = readStable(p);
+    assert.equal(calls, 2, '読み直した');
+    assert.equal(r.stable, true);
+    assert.equal(r.bytes.toString(), `${full.toString()}追記\n`);
+    assert.equal(checkExternalChange(p, r.snapshot), 'unchanged');
+  } finally {
+    m.mock.restore();
+  }
+});
+
+test('読み込み: 書き込みが続いて落ち着かなくても、記録した状態は古いので後の変化を必ず検知する', () => {
+  const p = makeFile('busy.md', 'a');
+  const real = fs.readFileSync;
+  // 読むたびに他のソフトが書き足す（落ち着かない）
+  const m = mock.method(fs, 'readFileSync', (file, ...rest) => {
+    const bytes = real(file, ...rest);
+    if (file === p) fs.appendFileSync(p, 'b');
+    return bytes;
+  });
+  let r;
+  try {
+    r = readStable(p, { retries: 2 });
+  } finally {
+    m.mock.restore();
+  }
+  assert.equal(r.stable, false);
+  // 書き込みが終わった後: 記録した状態（読む前）と違うので「変更あり」になり、読み直し・保存時の確認につながる
+  assert.equal(checkExternalChange(p, r.snapshot), 'changed');
+  assert.match(inspectBeforeOverwrite(p, r.snapshot).warnings.join(), /外部で変更/);
+});
+
+test('上書き前の確認: 更新日時・サイズが同じでも中身が違えば外部変更として警告する', () => {
+  const p = makeFile('same-size.md', '誤記があります');
+  const time = new Date('2026-01-01T00:00:00Z');
+  fs.utimesSync(p, time, time);
+  const snap = snapshotStat(p, fs.readFileSync(p));
+  // 同じ文字数の修正を、同じ更新日時のまま外部で行う（時刻の刻みが粗い場所・時刻を保つコピーなど）
+  fs.writeFileSync(p, '誤字があります');
+  fs.utimesSync(p, time, time);
+  assert.equal(checkExternalChange(p, snap), 'unchanged', '日時・サイズでは区別できない');
+  assert.match(inspectBeforeOverwrite(p, snap).warnings.join(), /外部で変更/);
+  // 中身も同じなら警告しない
+  const same = snapshotStat(p, fs.readFileSync(p));
+  assert.deepEqual(inspectBeforeOverwrite(p, same).warnings, []);
 });

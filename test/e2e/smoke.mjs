@@ -360,9 +360,27 @@ try {
       const sb = document.querySelector('#search').getBoundingClientRect();
       return { edWidth: ed.width, searchWidth: sb.width, fits: sb.left >= ed.left && sb.right <= ed.right };
     })()`);
-    assert.equal(narrow.edWidth, 248, '編集側の最小幅');
-    assert.ok(narrow.searchWidth <= 212, `検索バーの幅: ${narrow.searchWidth}`);
+    assert.equal(narrow.edWidth, 296, '編集側の最小幅');
+    assert.ok(narrow.searchWidth <= 260, `検索バーの幅: ${narrow.searchWidth}`);
     assert.equal(narrow.fits, true, '検索バーが編集側に収まる');
+    // 件数の最長表示（上限 9999 件）と正規表現エラーが見切れない。フォントの違い（Windows）を見込み 5% 以上の余裕を持つ
+    const countFit = await q(`(() => {
+      const c = document.querySelector('#search-count');
+      const saved = c.textContent;
+      const r = {};
+      for (const text of ['9999 / 9999+ 件', '正規表現エラー']) {
+        c.textContent = text;
+        const probe = document.createElement('span');
+        probe.style.cssText = 'position:absolute;visibility:hidden;white-space:nowrap;font:' + getComputedStyle(c).font;
+        probe.textContent = text;
+        document.body.append(probe);
+        r[text] = { clipped: c.scrollWidth > c.clientWidth, room: c.clientWidth >= probe.getBoundingClientRect().width * 1.05 };
+        probe.remove();
+      }
+      c.textContent = saved;
+      return r;
+    })()`);
+    assert.deepEqual(countFit, { '9999 / 9999+ 件': { clipped: false, room: true }, '正規表現エラー': { clipped: false, room: true } });
     await q(`document.querySelector('#btn-find').click()`);
     await q(`document.querySelector('#splitter').dispatchEvent(new MouseEvent('dblclick', { bubbles: true }))`);
     await q(`document.querySelector('[data-mode=view]').click()`);
@@ -404,6 +422,21 @@ try {
     assert.ok(items.includes('履歴をクリア(&C)'));
     const list = await q(`[...document.querySelectorAll('#recent-list .recent-name')].map((e) => e.textContent)`);
     assert.deepEqual(list, ['sample.md']);
+  });
+
+  await step('編集モード: スクロールバーの上では矢印カーソル、本文の上では I 字カーソル', async () => {
+    await q(`document.querySelector('[data-mode=edit]').click()`);
+    const cursorAt = (fromRight) => q(`(() => {
+      const ta = document.querySelector('#ed-input');
+      const r = ta.getBoundingClientRect();
+      ta.dispatchEvent(new MouseEvent('mousemove', { bubbles: true, clientX: r.right - ${fromRight}, clientY: r.top + r.height / 2 }));
+      return getComputedStyle(ta).cursor;
+    })()`);
+    assert.equal(await cursorAt(4), 'default', 'スクロールバーの上');
+    assert.equal(await cursorAt(200), 'text', '本文の上');
+    assert.equal(await cursorAt(4), 'default');
+    await q(`document.querySelector('#ed-input').dispatchEvent(new MouseEvent('mouseleave')), true`);
+    assert.equal(await q(`getComputedStyle(document.querySelector('#ed-input')).cursor`), 'text', '離れたら元に戻る');
   });
 
   await step('編集モード: 鏡の textContent が textarea.value と一致する', async () => {
@@ -564,7 +597,7 @@ try {
     await waitFor(() => q(`document.querySelector('#theme-dialog').open`), { label: 'テーマ画面（ツールバー）' });
     assert.equal(await q(`document.body.dataset.theme`), before);
     assert.equal(await q(`document.querySelector('#theme-dialog-title').textContent`), 'テーマ');
-    assert.equal(await q(`document.querySelector('#theme-dialog .td-mode-label').textContent`), 'システムテーマ');
+    assert.equal(await q(`document.querySelector('#theme-dialog .td-mode-label').textContent`), 'Windowsテーマ');
     await q(`document.querySelector('#theme-dialog').close()`);
     // 表示メニューからも同じ画面
     await clickMenu(['表示(&V)', 'テーマ(&T)...']);
@@ -838,6 +871,19 @@ try {
     await waitFor(async () => (await width()) === '980px', { label: '標準に戻す' });
     const saved = JSON.parse(fs.readFileSync(path.join(work, 'userData', 'settings.json'), 'utf8'));
     assert.deepEqual([saved.autoReload, saved.breaks, saved.previewWidth], [true, false, 'standard']);
+    // 改行で折り返す・表示幅のボタンは、プレビューを出さない編集モードでだけ無効（オン / オフの表示は残る）
+    const disabled = {};
+    for (const m of ['view', 'edit', 'split', 'edit', 'view']) {
+      await w.q(`document.querySelector('[data-mode=${m}]').click()`);
+      disabled[m] = await w.q(`['#btn-breaks', '#btn-width'].map((s) => document.querySelector(s).disabled)`);
+    }
+    assert.deepEqual(disabled, { view: [false, false], edit: [true, true], split: [false, false] });
+    // 編集モードのまま文書を読み直しても（ボタンを一度有効にする処理が走っても）無効のまま
+    await w.q(`document.querySelector('[data-mode=edit]').click()`);
+    await main.evaluate(`globalThis.__mvp.visibleContexts().find((x) => x.doc?.path.endsWith('saveas-dst.md')).win.webContents.send('menu:command', 'reload'), true`);
+    await sleep(500);
+    assert.deepEqual(await w.q(`['#btn-breaks', '#btn-width'].map((s) => document.querySelector(s).disabled)`), [true, true]);
+    assert.equal(await w.q(`document.body.dataset.mode`), 'edit');
     // 後片付け
     w.close();
     await main.evaluate(`globalThis.__mvp.visibleContexts().find((x) => x.doc?.path.endsWith('saveas-dst.md')).win.close()`);
@@ -856,6 +902,27 @@ try {
     assert.deepEqual(cascade, { dx: 28, dy: 28 });
     await clickMenu(['ファイル(&F)', '新しいウィンドウ(&N)']);
     await waitFor(() => main.evaluate(`globalThis.__mvp.visibleContexts().length === ${before + 1}`), { label: '新しいウィンドウ' });
+    // 空のウィンドウは 1 つだけ: もう一度「新しいウィンドウ」やファイル無しの 2 つ目の起動をしても増えず、既存の空のウィンドウを使う
+    await clickMenu(['ファイル(&F)', '新しいウィンドウ(&N)']);
+    const again = await main.evaluate(`(async () => {
+      const first = globalThis.__mvp.visibleContexts().find((x) => !x.doc);
+      const ctx = await globalThis.__mvp.openEmptyWindow();
+      const list = globalThis.__mvp.visibleContexts();
+      return { windows: list.length, empty: list.filter((x) => !x.doc).length, same: ctx === first };
+    })()`);
+    assert.deepEqual(again, { windows: before + 1, empty: 1, same: true }, '空のウィンドウは増えない');
+    // 空のウィンドウのメニューでは「新しいウィンドウ」が無効、文書を開いたウィンドウでは有効
+    const enabled = await waitFor(
+      () =>
+        main.evaluate(`(() => {
+          const item = (c) => c.menu?.items.find((m) => m.label === 'ファイル(&F)').submenu.items.find((m) => m.label === '新しいウィンドウ(&N)').enabled;
+          const list = globalThis.__mvp.visibleContexts();
+          const r = { empty: item(list.find((x) => !x.doc)), doc: item(list.find((x) => x.doc)) };
+          return r.empty === false ? r : null;
+        })()`),
+      { label: '空のウィンドウのメニュー' },
+    );
+    assert.deepEqual(enabled, { empty: false, doc: true });
     await waitFor(
       () =>
         main.evaluate(`(async () => {
@@ -1038,6 +1105,71 @@ try {
     await main.evaluate(`globalThis.__mvp.visibleContexts().find((x) => x.doc?.path === ${JSON.stringify(dst)}).win.close()`);
     await waitFor(() => main.evaluate(`!globalThis.__mvp.visibleContexts().some((x) => x.doc?.path === ${JSON.stringify(dst)})`), { label: '後片付け' });
     fs.chmodSync(ro, 0o644);
+  });
+
+  await step('Ctrl+W・ファイル > 閉じる: 未保存なら確認が出て、キャンセルでは閉じず、保存しないを選ぶと閉じる', async () => {
+    const f = path.join(work, 'close-test.md');
+    fs.writeFileSync(f, '# 閉じるテスト\n');
+    await main.evaluate(`globalThis.__mvp.openFile(${JSON.stringify(f)}).then(() => true)`);
+    const win = `globalThis.__mvp.visibleContexts().find((x) => x.doc?.path === ${JSON.stringify(f)})`;
+    await waitFor(() => main.evaluate(`Boolean(${win})`), { label: '開く' });
+    // 確認の応答を切り替えられるようにし、呼ばれた回数を数える
+    await main.evaluate(`(() => {
+      globalThis.__closeAsk = 0;
+      globalThis.__closeResponse = 2;
+      globalThis.__origBox = globalThis.__mvp.dialog.showMessageBox;
+      globalThis.__mvp.dialog.showMessageBox = async (w, o) => {
+        if (/変更を保存しますか/.test(o?.message)) { globalThis.__closeAsk++; return { response: globalThis.__closeResponse }; }
+        return globalThis.__origBox(w, o);
+      };
+      return true;
+    })()`);
+    await main.evaluate(`${win}.win.webContents.executeJavaScript("(() => { const ta = document.querySelector('#ed-input'); ta.value += 'x'; ta.dispatchEvent(new Event('input')); return true; })()")`);
+    await waitFor(() => main.evaluate(`${win}.dirty === true`), { label: '未保存' });
+    // Ctrl+W → キャンセル
+    await main.evaluate(`${win}.win.webContents.executeJavaScript("window.dispatchEvent(new KeyboardEvent('keydown', { key: 'w', ctrlKey: true })), true")`);
+    await waitFor(() => main.evaluate('globalThis.__closeAsk === 1'), { label: 'Ctrl+W で確認' });
+    // ファイル > 閉じる → キャンセル
+    await main.evaluate(`${win}.win.webContents.send('menu:command', 'close'), true`);
+    await waitFor(() => main.evaluate('globalThis.__closeAsk === 2'), { label: '閉じるで確認' });
+    await sleep(300);
+    assert.ok(await main.evaluate(`Boolean(${win})`), 'キャンセルでは閉じない');
+    assert.equal(fs.readFileSync(f, 'utf8'), '# 閉じるテスト\n', '保存されていない');
+    // 保存しない → 閉じる
+    await main.evaluate('globalThis.__closeResponse = 1, true');
+    await main.evaluate(`${win}.win.webContents.executeJavaScript("window.dispatchEvent(new KeyboardEvent('keydown', { key: 'w', ctrlKey: true })), true")`);
+    await waitFor(() => main.evaluate(`!${win}`), { label: '閉じる' });
+    assert.equal(fs.readFileSync(f, 'utf8'), '# 閉じるテスト\n', '保存しないので内容はそのまま');
+    await main.evaluate('globalThis.__mvp.dialog.showMessageBox = globalThis.__origBox, true');
+  });
+
+  await step('外部で開けない形に置き換わると、読み直せなかったことを知らせ、読み直しを繰り返さない', async () => {
+    const f = path.join(work, 'replaced.md');
+    fs.writeFileSync(f, '# 元の内容\n');
+    await main.evaluate(`globalThis.__mvp.openFile(${JSON.stringify(f)}).then(() => true)`);
+    const win = `globalThis.__mvp.visibleContexts().find((x) => x.doc?.path === ${JSON.stringify(f)})`;
+    const rq = (expr) => main.evaluate(`${win}.win.webContents.executeJavaScript(${JSON.stringify(expr)})`);
+    await waitFor(() => rq(`document.querySelector('#ed-input').value === '# 元の内容\\n'`), { label: '開く' });
+    const logFile = path.join(work, 'userData', 'logs', 'main.log');
+    const failures = () => (fs.readFileSync(logFile, 'utf8').match(/自動再読み込みに失敗: .*replaced\.md/g) ?? []).length;
+    // 外部でバイナリに置き換わる → 読み直せない旨を通知。表示は元の内容のまま
+    fs.writeFileSync(f, Buffer.from([0, 1, 2, 3, 0, 0, 255, 0, 7, 0]));
+    await waitFor(() => rq(`!document.querySelector('#banner').hidden && document.querySelector('#banner-text').textContent`), { label: '通知', timeout: 8000 });
+    assert.match(await rq(`document.querySelector('#banner-text').textContent`), /読み込めませんでした（表示できない種類のファイル）/);
+    assert.equal(await rq(`document.querySelector('#ed-input').value`), '# 元の内容\n');
+    // 同じ状態のままなら、読み直しを繰り返さない
+    await sleep(3000);
+    assert.equal(failures(), 1, '読み直しの試みは 1 回だけ');
+    // 読める内容に戻れば、自動で読み直して通知も消える
+    fs.writeFileSync(f, '# 直った内容\n');
+    await waitFor(() => rq(`document.querySelector('#ed-input').value === '# 直った内容\\n' && document.querySelector('#banner').hidden`), { label: '読み直し', timeout: 8000 });
+    // 手動の再読み込みで読めないとき（ファイルが無い）も理由を知らせる
+    await main.evaluate(`(() => { const c = ${win}; globalThis.__mvp.dialog.showMessageBox = async () => ({ response: 0 }); return true; })()`);
+    fs.rmSync(f);
+    await sleep(1500);
+    await rq(`window.dispatchEvent(new KeyboardEvent('keydown', { key: 'F5' })), true`);
+    await waitFor(() => rq(`/ファイルが見つかりません/.test(document.querySelector('#banner-text').textContent) && !document.querySelector('#banner').hidden`), { label: '手動の再読み込みの失敗', timeout: 5000 });
+    await main.evaluate(`${win}.win.destroy(), true`);
   });
 
   await step('予備ウィンドウが先読みされている', async () => {

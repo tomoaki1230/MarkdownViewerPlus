@@ -5,7 +5,7 @@ import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { createLogger, isGpuFailure, isNetworkPath } from './diagnostics.js';
 import { buildSaveBytes, encodingDisplay, looksBinary, parseDocument } from './document.js';
-import { checkExternalChange, inspectBeforeOverwrite, isWritable, safeWriteFile, snapshotStat } from './file-guard.js';
+import { checkExternalChange, inspectBeforeOverwrite, isWritable, readStable, safeWriteFile, snapshotStat } from './file-guard.js';
 import { buildMenu } from './menu.js';
 import { buildOpenNotice, OpenNotice } from './open-notice.js';
 import { pushRecent, removeRecent } from './recent.js';
@@ -24,7 +24,8 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const APP_ROOT = path.join(__dirname, '..', '..');
 const RENDERER_HTML = path.join(APP_ROOT, 'dist', 'renderer', 'index.html');
 const PRELOAD = path.join(APP_ROOT, 'src', 'preload', 'preload.cjs');
-const ICON = path.join(APP_ROOT, 'assets', 'icon.png');
+// Windows は複数サイズ入りの .ico（ビルド時に作る）を使う。大きな PNG を渡すと Windows が粗く縮小してアイコンが汚くなるため
+const ICON = process.platform === 'win32' ? path.join(APP_ROOT, 'dist', 'icon.ico') : path.join(APP_ROOT, 'assets', 'icon.png');
 const APP_NAME = 'MarkdownViewerPlus';
 const MAX_FILE_SIZE = 50 * 1024 * 1024;
 // 開くダイアログの絞り込み・プレビュー内のリンクをこのアプリで開く対象（開けるかどうか自体は中身で判断する）
@@ -242,7 +243,8 @@ function readDocument(filePath) {
   // 利用者の操作で避けられる理由（フォルダ・大きすぎる・表示できない種類）は OpenNotice で、お知らせとして伝える
   if (!st.isFile()) throw new OpenNotice('folder');
   if (st.size > MAX_FILE_SIZE) throw new OpenNotice('too-large');
-  const bytes = fs.readFileSync(filePath);
+  // 書き込み途中を読んでも変化を見逃さないよう、読む前の状態を記録する（file-guard.js の readStable）
+  const { bytes, snapshot } = readStable(filePath);
   const parsed = parseDocument(bytes);
   // 開けるかどうかは拡張子ではなく中身で判断する（.java・.js などのテキストは開ける。exe・画像などは開かない）
   if (looksBinary(parsed.text)) throw new OpenNotice('binary');
@@ -250,8 +252,16 @@ function readDocument(filePath) {
     path: filePath,
     base: baseFromParsed(parsed),
     eolLabel: parsed.eolLabel,
-    stat: snapshotStat(filePath),
+    stat: snapshot,
   };
+}
+
+// 読み込めなかった理由（画面に出す文言）
+function readErrorText(err) {
+  if (err.code === 'ENOENT') return 'ファイルが見つかりません';
+  if (err.code === 'EACCES' || err.code === 'EPERM') return 'アクセスが拒否されました';
+  if (err.code === 'EBUSY') return '他のソフトが使用中です';
+  return err.message;
 }
 
 function docPayload(doc) {
@@ -346,7 +356,15 @@ function findEmptyContext() {
   return empty.find((c) => c.win === focused) ?? empty.at(-1) ?? null;
 }
 
+// 空のウィンドウは 1 つだけにする。既にあればそれを前面へ出す（新しいウィンドウ・ファイル無しの 2 つ目の起動など）
 async function openEmptyWindow() {
+  const existing = findEmptyContext();
+  if (existing) {
+    if (existing.win.isMinimized()) existing.win.restore();
+    existing.win.show();
+    existing.win.focus();
+    return existing;
+  }
   const ctx = takeSpare() ?? createWindowContext({ isSpare: false });
   await ctx.ready;
   ctx.win.webContents.send('doc:empty');
@@ -466,7 +484,7 @@ function adoptSavedBytes(ctx, filePath, bytes) {
   doc.path = filePath;
   doc.base = baseFromParsed(saved);
   doc.eolLabel = saved.eolLabel;
-  doc.stat = snapshotStat(filePath);
+  doc.stat = snapshotStat(filePath, bytes);
   ctx.dirty = false;
   ctx.notifiedStat = null;
   updateMenu(ctx);
@@ -649,10 +667,6 @@ function checkExternalChangeFor(ctx) {
   if (!doc || ctx.win.isDestroyed()) return;
   const state = checkExternalChange(doc.path, doc.stat);
   if (state === 'unchanged') return;
-  if (state === 'changed' && !ctx.dirty && settings.autoReload) {
-    reloadFromDisk(ctx, 'auto');
-    return;
-  }
   let key = 'missing';
   if (state === 'changed') {
     try {
@@ -662,9 +676,19 @@ function checkExternalChangeFor(ctx) {
       key = 'missing';
     }
   }
+  let unreadable = null;
+  if (key !== 'missing' && !ctx.dirty && settings.autoReload) {
+    // 読み直せなかった状態（開けない種類に置き換わった等）のままなら、毎回読み直しを試みない
+    if (ctx.failedReloadKey === key) return;
+    const result = reloadFromDisk(ctx, 'auto');
+    if (result.ok) return;
+    ctx.failedReloadKey = key;
+    unreadable = result.error;
+    log(`自動再読み込みに失敗: ${doc.path} ${result.error}`);
+  }
   if (ctx.notifiedStat === key) return;
   ctx.notifiedStat = key;
-  ctx.win.webContents.send('doc:external-changed', { missing: key === 'missing', dirty: ctx.dirty });
+  ctx.win.webContents.send('doc:external-changed', { missing: key === 'missing', dirty: ctx.dirty, unreadable });
 }
 
 // 手動の再読み込み。編集中なら、変更を破棄してよいか確認する（confirmed のときは確認済み）
@@ -696,12 +720,13 @@ function reloadFromDisk(ctx, reason = 'manual') {
     ctx.doc = readDocument(ctx.doc.path);
   } catch (err) {
     ctx.prevDoc = null;
-    return { ok: false, error: err.message };
+    return { ok: false, error: readErrorText(err) };
   }
   watchDocument(ctx);
   ctx.dirty = false;
   updateMenu(ctx);
   ctx.notifiedStat = null;
+  ctx.failedReloadKey = null;
   ctx.win.webContents.send('doc:reload', { ...docPayload(ctx.doc), reason });
   return { ok: true };
 }
@@ -950,7 +975,8 @@ function setAppSetting(key, value) {
 }
 
 function createTray() {
-  const image = nativeImage.createFromPath(ICON).resize({ width: 16, height: 16 });
+  // .ico は表示倍率に合うサイズが選ばれる。PNG のときは高品質に縮小する
+  const image = ICON.endsWith('.ico') ? ICON : nativeImage.createFromPath(ICON).resize({ width: 16, height: 16, quality: 'best' });
   tray = new Tray(image);
   tray.setToolTip(APP_NAME);
   tray.setContextMenu(
@@ -1004,6 +1030,8 @@ function registerIpc() {
   ipcMain.on('theme:set', (_e, theme) => setTheme(theme));
   ipcMain.on('theme:set-palette', (_e, scheme, id) => setPalette(scheme, id));
   ipcMain.on('app:quit', () => app.quit());
+  // Ctrl+W・ファイル > 閉じる。win.close() は close イベント（未保存の確認）を通る
+  ipcMain.on('app:close-window', (e) => ctxFromEvent(e)?.win.close());
   ipcMain.handle('app:licenses', () => readThirdPartyLicenses());
   // ウィンドウの最小幅（レンダラーがツールバーの配置から測った本文領域の幅に、枠の分を足す）
   ipcMain.on('ui:min-width', (e, width) => {
@@ -1178,7 +1206,7 @@ if (!app.requestSingleInstanceLock()) {
 
     // E2E テスト用: main のインスペクタから dialog を差し替えたり状態を参照できるようにする
     if (process.env.MVP_E2E) {
-      globalThis.__mvp = { app, dialog, contexts, openFile, openFiles, openEmptyWindow, visibleContexts, cascadePosition, get spare() { return spare; }, get tray() { return tray; } };
+      globalThis.__mvp = { app, dialog, shell, Menu, contexts, openFile, openFiles, openEmptyWindow, visibleContexts, cascadePosition, get spare() { return spare; }, get tray() { return tray; } };
     }
   });
 }

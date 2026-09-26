@@ -60,8 +60,8 @@ function buildThemePicker({ dialog, onSelect, onMode }) {
   // 明暗の選び方（ツールバーのテーマボタン・表示メニューと同じ設定）
   const mode = el('div', 'td-mode');
   mode.setAttribute('role', 'radiogroup');
-  mode.setAttribute('aria-label', 'システムテーマ');
-  mode.append(el('span', 'td-mode-label', 'システムテーマ'));
+  mode.setAttribute('aria-label', 'Windowsテーマ');
+  mode.append(el('span', 'td-mode-label', 'Windowsテーマ'));
   const modeButtons = MODE_LABELS.map(([value, label]) => {
     const b = el('button', 'td-mode-btn', label);
     b.type = 'button';

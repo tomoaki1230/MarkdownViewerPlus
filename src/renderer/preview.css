@@ -28,6 +28,11 @@
   }
 }
 
+/* 巨大な段落の小分け（markdown.js の splitParagraph）。塊の境目は段落内の改行の位置で、見た目は 1 つの段落のまま */
+.markdown-body .md-chunk {
+  display: block;
+}
+
 .markdown-body {
   /* 拡大縮小（--zoom はアプリ側の :root から継承される）。ツールバーは拡大しない */
   zoom: var(--zoom, 1);
