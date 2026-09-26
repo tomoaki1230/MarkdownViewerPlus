@@ -1,2 +1,4 @@
-# Auto detect text files and perform LF normalization
-* text=auto
+# テキストファイルは改行を LF に統一する（Windows で取り出しても CRLF に変換しない）
+* text=auto eol=lf
+*.png binary
+*.ico binary

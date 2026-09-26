@@ -1,0 +1,1204 @@
+/* アプリ UI（ツールバー・エディタ・ステータスバー）
+   ここの :root の値は初回描画用の既定値（標準テーマ）。起動後は選択中のカラーテーマ（src/shared/themes.js）で上書きする */
+:root {
+  --bg: #ffffff;
+  --bg-sub: #f6f8fa;
+  --bg-hover: #eaeef2;
+  --fg: #1f2328;
+  --fg-muted: #656d76;
+  --border: #d0d7de;
+  --accent: #0969da;
+  --accent-fg: #ffffff;
+  --gutter-fg: #8c959f;
+  --hit: rgba(255, 200, 0, 0.45);
+  --hit-cur: rgba(255, 128, 0, 0.75);
+  --selection: rgba(9, 105, 218, 0.28);
+  --banner-bg: #fff8c5;
+  --banner-border: #d4a72c;
+  --danger: #cf222e;
+  --splitter-active: #b6bfc8;
+  --tk-mark: #0550ae;
+  --tk-code: #953800;
+  --tk-link: #0969da;
+  --tk-html: #116329;
+  --tk-emph: #8250df;
+  --tk-muted: #6e7781;
+  --editor-font: 'BIZ UDGothic', 'BIZ UDゴシック', Consolas, 'MS Gothic', 'Noto Sans Mono CJK JP', monospace;
+  /* 拡大縮小は本文だけ（--zoom はレンダラーが設定する倍率） */
+  --zoom: 1;
+  --editor-size: calc(14px * var(--zoom));
+  --editor-line: 1.6;
+  --gutter: calc(3ch + 20px);
+  --split: 50%;
+  /* 検索バーの幅と、2 ペインで編集側に確保する最小幅（検索バー + 右余白 26px + 左余白 10px） */
+  --search-w: 212px;
+  --editor-min: 248px;
+  color-scheme: light;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0d1117;
+    --bg-sub: #161b22;
+    --bg-hover: #21262d;
+    --fg: #e6edf3;
+    --fg-muted: #8d96a0;
+    --border: #30363d;
+    --accent: #2f81f7;
+    --gutter-fg: #6e7681;
+    --hit: rgba(210, 153, 34, 0.4);
+    --hit-cur: rgba(255, 140, 0, 0.7);
+    --selection: rgba(47, 129, 247, 0.4);
+    --banner-bg: #3b2e00;
+    --banner-border: #9e6a03;
+    --danger: #f85149;
+    --splitter-active: #3d444d;
+    --tk-mark: #79c0ff;
+    --tk-code: #ffa657;
+    --tk-link: #58a6ff;
+    --tk-html: #7ee787;
+    --tk-emph: #d2a8ff;
+    --tk-muted: #8b949e;
+    color-scheme: dark;
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  height: 100%;
+}
+
+body {
+  display: grid;
+  grid-template-rows: auto auto 1fr auto;
+  background: var(--bg);
+  color: var(--fg);
+  font: 13px/1.4 'Segoe UI', 'Yu Gothic UI', 'Meiryo UI', system-ui, sans-serif;
+  overflow: hidden;
+}
+/* hidden 要素があっても行がずれないよう、各領域の行を固定する */
+#toolbar {
+  grid-row: 1;
+}
+#banner {
+  grid-row: 2;
+}
+#workspace,
+#empty {
+  grid-row: 3;
+}
+#status {
+  grid-row: 4;
+}
+
+button {
+  font: inherit;
+  color: inherit;
+}
+
+svg {
+  width: 16px;
+  height: 16px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.3;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+svg circle,
+svg text {
+  fill: currentColor;
+  stroke: none;
+}
+
+/* ---------------- ツールバー（編集モード / 2ペインでは 2 段） ---------------- */
+#toolbar {
+  display: flex;
+  flex-direction: column;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-sub);
+  min-width: 0;
+}
+.tb-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 10px;
+  min-width: 0;
+  overflow: hidden;
+}
+.spacer {
+  flex: 1;
+}
+.sep {
+  flex: none;
+  width: 1px;
+  height: 18px;
+  margin: 0 4px;
+  background: var(--border);
+}
+.tb-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 28px;
+  padding: 0 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+  cursor: pointer;
+  white-space: nowrap;
+  flex: none;
+}
+.tb-btn.icon-only {
+  width: 28px;
+  padding: 0;
+  justify-content: center;
+}
+.tb-btn:hover:not(:disabled) {
+  background: var(--bg-hover);
+}
+.tb-btn.primary:not(:disabled),
+#btn-save:not(:disabled) {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--accent-fg);
+}
+.tb-btn:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+.mode-switch {
+  display: inline-flex;
+  flex: none;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  overflow: hidden;
+}
+.mode-switch button {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 26px;
+  padding: 0 12px;
+  border: none;
+  background: var(--bg);
+  cursor: pointer;
+  white-space: nowrap;
+}
+.mode-switch button + button {
+  border-left: 1px solid var(--border);
+}
+.mode-switch button[aria-pressed='true'] {
+  background: var(--accent);
+  color: var(--accent-fg);
+}
+.mode-switch button:hover:not([aria-pressed='true']):not(:disabled) {
+  background: var(--bg-hover);
+}
+.mode-switch button:disabled {
+  color: var(--fg-muted);
+  opacity: 0.55;
+  cursor: default;
+}
+/* 1 段目: 左（ファイル操作など）は幅が足りないとき後ろのボタンから丸ごと隠す
+   （折り返して 2 行目へ回し、はみ出た分は見せない）。右（モード切替・明暗）は常に全体を見せる */
+.tb-left {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  height: 30px;
+  overflow: hidden;
+}
+.tb-right {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.tb-btn:disabled svg,
+.zoom button:disabled svg {
+  opacity: 0.7;
+}
+/* 切り替えボタン（自動再読み込み・改行で折り返す）: オンのときは押された状態 */
+.tb-btn.toggle[aria-pressed='true'],
+/* 検索ボタン（1 段目）: 検索欄が開いているときは押された状態 */
+#btn-find[aria-pressed='true'] {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 18%, transparent);
+}
+/* 拡大縮小 */
+.zoom {
+  display: inline-flex;
+  flex: none;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  overflow: hidden;
+}
+.zoom button {
+  height: 26px;
+  min-width: 28px;
+  padding: 0 6px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  background: var(--bg);
+  cursor: pointer;
+}
+.zoom button + button {
+  border-left: 1px solid var(--border);
+}
+.zoom button:hover:not(:disabled) {
+  background: var(--bg-hover);
+}
+.zoom button:disabled {
+  color: var(--fg-muted);
+  opacity: 0.55;
+  cursor: default;
+}
+#btn-zoom-reset {
+  min-width: 52px;
+  font-variant-numeric: tabular-nums;
+  font-size: 12px;
+}
+/* テーマボタン: 現在の設定のアイコンだけ出す */
+#btn-theme svg {
+  display: none;
+}
+:root[data-theme='system'] #btn-theme .ic-system,
+:root[data-theme='light'] #btn-theme .ic-light,
+:root[data-theme='dark'] #btn-theme .ic-dark {
+  display: block;
+}
+
+/* 2 段目（編集用）: 表示モードでは出さない */
+#tools {
+  display: none;
+  gap: 2px;
+  padding-top: 0;
+}
+body[data-mode='edit'] #tools,
+body[data-mode='split'] #tools {
+  display: flex;
+}
+#tools button {
+  height: 28px;
+  min-width: 28px;
+  padding: 0 6px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  cursor: pointer;
+  flex: none;
+}
+#tools button:hover {
+  background: var(--bg-hover);
+  border-color: var(--border);
+}
+#tools code {
+  font-size: 11px;
+}
+
+/* ---------------- 外部変更の通知 ---------------- */
+#banner {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  background: var(--banner-bg);
+  border-bottom: 1px solid var(--banner-border);
+}
+#banner[hidden] {
+  display: none;
+}
+#banner-text {
+  flex: 1;
+}
+#banner button {
+  border: 1px solid var(--banner-border);
+  background: transparent;
+  border-radius: 4px;
+  padding: 2px 10px;
+  cursor: pointer;
+}
+
+/* ---------------- 作業領域 ---------------- */
+#workspace {
+  position: relative;
+  display: grid;
+  min-height: 0;
+  grid-template-columns: 1fr;
+}
+body[data-mode='view'] #editor-pane,
+body[data-mode='view'] #splitter,
+body[data-mode='edit'] #preview-pane,
+body[data-mode='edit'] #splitter {
+  display: none;
+}
+body[data-mode='split'] #workspace {
+  /* 区切りの中心が --split の位置に来るようにする（50% で左右が同じ幅）。
+     編集側は検索バーが見切れない幅（--editor-min）より狭くならない */
+  grid-template-columns: max(var(--editor-min), calc(var(--split) - 3.5px)) 7px 1fr;
+}
+#editor-pane,
+#preview-pane {
+  position: relative;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+/* 2 ペインの区切り（VSCode 風: 細い線 + 中央に縦の「…」。ホバー・ドラッグ中は線が太く強調される） */
+#splitter {
+  position: relative;
+  /* グリップの枠が左右のペインにはみ出すので、ペインより手前に描く（右側が隠れないように） */
+  z-index: 2;
+  cursor: col-resize;
+  background: var(--bg);
+  touch-action: none;
+}
+#splitter::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 3px;
+  width: 1px;
+  background: var(--border);
+  transition: background-color 0.1s 0.15s, left 0.1s 0.15s, width 0.1s 0.15s;
+}
+/* アクティブ時（ホバー・ドラッグ中）は周囲に溶け込む控えめな色で少しだけ太くする */
+#splitter:hover::before,
+#splitter.dragging::before {
+  left: 2px;
+  width: 3px;
+  background: var(--splitter-active);
+}
+/* グリップは枠線（1px の影）込みで区切りの幅 7px に収める（はみ出すと隣のペインに隠れて見切れる） */
+#splitter .grip {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 5px;
+  height: 22px;
+  transform: translate(-50%, -50%);
+  border-radius: 3px;
+  background:
+    radial-gradient(circle, var(--fg-muted) 1.2px, transparent 1.6px) center 0 / 5px 7.3px repeat-y,
+    var(--bg);
+  box-shadow: 0 0 0 1px var(--border);
+  pointer-events: none;
+}
+#splitter:hover .grip,
+#splitter.dragging .grip {
+  background:
+    radial-gradient(circle, var(--fg-muted) 1.2px, transparent 1.6px) center 0 / 5px 7.3px repeat-y,
+    var(--bg-hover);
+  box-shadow: 0 0 0 1px var(--splitter-active);
+}
+#preview {
+  flex: 1;
+  overflow: auto;
+  outline: none;
+}
+/* プレビューのスクロールバーもエディタと同じ幅・見た目にする（ヒット位置のマークを重ねるため） */
+#preview::-webkit-scrollbar {
+  width: 12px;
+  height: 12px;
+}
+#preview::-webkit-scrollbar-thumb {
+  background: color-mix(in srgb, var(--fg-muted) 45%, transparent);
+  border-radius: 6px;
+  border: 3px solid transparent;
+  background-clip: padding-box;
+}
+/* 検索ヒット位置のマーク（概要ルーラー）。スクロールバー（12px）と重ならないよう、その左隣に置く。
+   幅 12px は本文右の余白（エディタ 16px・プレビュー 40px）に収まるので文字にも重ならない */
+.hit-ruler {
+  position: absolute;
+  top: 0;
+  right: 13px;
+  bottom: 0;
+  width: 12px;
+  z-index: 3;
+  pointer-events: none;
+}
+.hit-ruler[hidden] {
+  display: none;
+}
+.hit-ruler i {
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: 3px;
+  margin-top: -1px;
+  border-radius: 1px;
+  background: var(--hit-cur);
+}
+.hit-ruler i.cur {
+  left: -1px;
+  right: -1px;
+  height: 4px;
+  background: var(--accent);
+}
+
+/* ---------------- エディタ（透明 textarea を鏡 pre の上に重ねる） ----------------
+   鏡と textarea は、フォント・行の高さ・余白・折り返し・スクロールバー幅をすべて同じにすること。
+   1 つでも違うと、見えている文字とキャレット位置がずれる。 */
+#editor {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  background: linear-gradient(to right, var(--bg-sub) var(--gutter), var(--bg) var(--gutter));
+}
+#ed-mirror,
+#ed-input {
+  position: absolute;
+  inset: 0;
+  margin: 0;
+  border: 0;
+  padding: 8px 16px 40vh var(--gutter);
+  font-family: var(--editor-font);
+  font-size: var(--editor-size);
+  line-height: var(--editor-line);
+  letter-spacing: 0;
+  tab-size: 4;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: normal;
+  overflow-x: hidden;
+  overflow-y: scroll;
+  font-variant-ligatures: none;
+  text-rendering: optimizeSpeed;
+}
+#ed-mirror {
+  color: var(--fg);
+  pointer-events: none;
+  counter-reset: ln;
+}
+#ed-input {
+  resize: none;
+  outline: none;
+  background: transparent;
+  color: transparent;
+  caret-color: var(--fg);
+}
+#ed-input::selection {
+  background: var(--selection);
+  color: transparent;
+}
+/* スクロールバーの幅を両者で揃える（鏡側のつまみは描かない） */
+#ed-mirror::-webkit-scrollbar,
+#ed-input::-webkit-scrollbar {
+  width: 12px;
+}
+#ed-input::-webkit-scrollbar-thumb {
+  background: color-mix(in srgb, var(--fg-muted) 45%, transparent);
+  border-radius: 6px;
+  border: 3px solid transparent;
+  background-clip: padding-box;
+}
+#ed-mirror::-webkit-scrollbar-thumb {
+  background: transparent;
+}
+
+/* 1 行 = 1 つの箱。改行文字は描画しないが textContent には残す */
+.ed-line {
+  display: block;
+  position: relative;
+  min-height: 1lh;
+  counter-increment: ln;
+}
+.ed-nl {
+  display: none;
+}
+.ed-line::before {
+  content: counter(ln);
+  position: absolute;
+  left: calc(-1 * var(--gutter));
+  width: calc(var(--gutter) - 12px);
+  text-align: right;
+  color: var(--gutter-fg);
+  font-size: 0.85em;
+  line-height: calc(var(--editor-size) * var(--editor-line));
+}
+
+/* 色分け（文字幅を変える装飾は禁止: 太字・斜体・フォントサイズ変更はキャレット位置をずらす） */
+.ln-h {
+  color: var(--tk-mark);
+}
+.ln-code,
+.ln-fence {
+  color: var(--tk-code);
+}
+.ln-fence,
+.ln-hr {
+  color: var(--tk-muted);
+}
+.tk-mark,
+.tk-list,
+.tk-quote,
+.tk-task,
+.tk-pipe {
+  color: var(--tk-mark);
+}
+.tk-code {
+  color: var(--tk-code);
+  background: color-mix(in srgb, var(--tk-code) 10%, transparent);
+}
+.tk-link,
+.tk-url,
+.tk-autolink {
+  color: var(--tk-link);
+}
+.tk-html,
+.tk-comment {
+  color: var(--tk-html);
+}
+.tk-comment {
+  opacity: 0.8;
+}
+.tk-strong,
+.tk-em,
+.tk-del {
+  color: var(--tk-emph);
+}
+.tk-del {
+  text-decoration: line-through;
+}
+.tk-emoji {
+  color: var(--tk-code);
+}
+.tk-esc {
+  color: var(--tk-muted);
+}
+/* 現在のヒットの行は薄く塗る（ヒット位置は右側のマークで示す） */
+.ed-line.ln-hit-cur {
+  background: color-mix(in srgb, var(--hit) 35%, transparent);
+}
+.hit {
+  background: var(--hit);
+  border-radius: 2px;
+}
+.hit-cur {
+  background: var(--hit-cur);
+  outline: 1px solid var(--hit-cur);
+}
+
+/* ---------------- 検索バー（エディタ右上。対象は編集側） ---------------- */
+#search {
+  position: absolute;
+  top: 6px;
+  right: 26px;
+  z-index: 5;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  width: var(--search-w);
+  padding: 5px;
+  background: var(--bg-sub);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+}
+#search[hidden] {
+  display: none;
+}
+/* 2 ペインでは編集側（左）の右上に出す（編集側の幅は最小幅の制約も含めて計算） */
+body[data-mode='split'] #search {
+  right: auto;
+  left: calc(max(var(--editor-min), calc(var(--split) - 3.5px)) - var(--search-w) - 26px);
+}
+/* 2 段構成（1 段目: 検索語・閉じる / 2 段目: オプション・件数・前後） */
+.search-row {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+}
+#search input {
+  flex: 1;
+  min-width: 0;
+  height: 26px;
+  padding: 0 6px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg);
+  color: var(--fg);
+  font: inherit;
+  outline: none;
+}
+#search input:focus {
+  border-color: var(--accent);
+}
+#search.no-result #search-input {
+  border-color: var(--danger);
+}
+#search button {
+  height: 24px;
+  min-width: 24px;
+  padding: 0 4px;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  background: transparent;
+  cursor: pointer;
+}
+#search button:hover {
+  background: var(--bg-hover);
+}
+#search button.opt[aria-pressed='true'] {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 18%, transparent);
+}
+#search-count {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: center;
+  color: var(--fg-muted);
+  font-size: 12px;
+}
+
+/* ---------------- 起動直後（文書が届くまで） ----------------
+   ウィンドウは作成と同時に表示するので、それまではツールバーだけを出し、本文領域は背景色のままにする */
+body.is-loading #workspace,
+body.is-loading #empty {
+  visibility: hidden;
+}
+
+/* ---------------- ファイル未読み込み ---------------- */
+#empty {
+  display: none;
+}
+/* ツールバー 1 段目のボタンは隠さず非活性にする（どんな機能があるか最初から見えるように） */
+body.is-empty #workspace,
+body.is-empty #tools,
+body.is-empty #st-mode,
+body.is-empty #st-chars {
+  display: none !important;
+}
+body.is-empty #empty {
+  display: grid;
+  place-items: center;
+  grid-row: 3;
+  overflow: auto;
+}
+.empty-inner {
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+  width: min(640px, calc(100vw - 32px));
+  padding: 24px 0;
+}
+/* 最近開いたファイル */
+#recent[hidden] {
+  display: none;
+}
+.recent-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+}
+.recent-head h2 {
+  margin: 0 0 6px;
+  font-size: 13px;
+  color: var(--fg-muted);
+  font-weight: 600;
+}
+.link-btn {
+  border: none;
+  background: none;
+  color: var(--accent);
+  cursor: pointer;
+  padding: 0;
+  font-size: 12px;
+}
+/* 3 件分の高さだけ見せ、それより多いときはスクロールバーを出す（1 件の高さは固定） */
+#recent-list {
+  --recent-item-h: 52px;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  max-height: calc(var(--recent-item-h) * 3 + 2px);
+  overflow-x: hidden;
+  overflow-y: auto;
+}
+#recent-list li {
+  height: var(--recent-item-h);
+}
+#recent-list li + li {
+  border-top: 1px solid var(--border);
+}
+#recent-list::-webkit-scrollbar {
+  width: 12px;
+}
+#recent-list::-webkit-scrollbar-thumb {
+  background: color-mix(in srgb, var(--fg-muted) 45%, transparent);
+  border-radius: 6px;
+  border: 3px solid transparent;
+  background-clip: padding-box;
+}
+#recent-list button {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  align-items: flex-start;
+  width: 100%;
+  height: 100%;
+  padding: 0 12px;
+  border: none;
+  background: var(--bg);
+  text-align: left;
+  cursor: pointer;
+}
+#recent-list button:hover {
+  background: var(--bg-hover);
+}
+.recent-name {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 600;
+}
+.recent-dir {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--fg-muted);
+  font-size: 12px;
+}
+.empty-box {
+  text-align: center;
+  color: var(--fg-muted);
+  padding: 48px 64px;
+  border: 2px dashed var(--border);
+  border-radius: 12px;
+}
+.empty-title {
+  font-size: 16px;
+  color: var(--fg);
+}
+body.drag-over .empty-box,
+body.drag-over #workspace {
+  outline: 3px dashed var(--accent);
+  outline-offset: -6px;
+}
+
+/* ---------------- ステータスバー ---------------- */
+/* 高さは表示内容に関係なく一定（空のウィンドウで項目が無くても潰れて中途半端に見えないように） */
+#status {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  height: 24px;
+  padding: 0 10px;
+  line-height: 1;
+  border-top: 1px solid var(--border);
+  background: var(--bg-sub);
+  color: var(--fg-muted);
+  font-size: 12px;
+  white-space: nowrap;
+  min-width: 0;
+}
+#st-path {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+#st-message {
+  color: var(--accent);
+}
+#st-readonly,
+#st-dirty {
+  color: var(--danger);
+}
+/* 項目の間に区切り線 */
+#status .st-item:not(:empty) + .st-item:not(:empty):not([hidden]) {
+  padding-left: 14px;
+  border-left: 1px solid var(--border);
+}
+#st-path + #st-message {
+  border-left: none !important;
+}
+
+/* ---------------- カラーテーマの選択画面 ---------------- */
+#theme-dialog {
+  width: min(920px, calc(100vw - 32px));
+  max-height: calc(100vh - 48px);
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg);
+  color: var(--fg);
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.35);
+}
+#theme-dialog::backdrop {
+  background: rgba(0, 0, 0, 0.4);
+}
+.td-inner {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 16px 20px;
+}
+.td-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.td-head h2 {
+  margin: 0;
+  font-size: 16px;
+}
+.td-close {
+  width: 28px;
+  height: 28px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  font-size: 18px;
+  cursor: pointer;
+}
+.td-close:hover {
+  background: var(--bg-hover);
+}
+.td-mode {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.td-mode-label {
+  color: var(--fg-muted);
+  margin-right: 4px;
+}
+.td-mode-btn {
+  height: 28px;
+  padding: 0 12px;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: var(--bg);
+  cursor: pointer;
+}
+.td-mode-btn:hover {
+  background: var(--bg-hover);
+}
+.td-mode-btn[aria-checked='true'] {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: var(--accent-fg);
+}
+.td-section h3 {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 0 8px;
+  font-size: 13px;
+  color: var(--fg-muted);
+}
+.td-section[hidden] {
+  display: none;
+}
+.td-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(190px, 1fr));
+  gap: 10px;
+}
+.theme-card {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 6px 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg);
+  text-align: left;
+  cursor: pointer;
+}
+.theme-card:hover {
+  background: var(--bg-hover);
+}
+.theme-card[aria-pressed='true'] {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent);
+}
+.theme-card:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+.tc-name {
+  margin-top: 4px;
+  padding: 0 2px;
+  font-weight: 600;
+}
+.theme-card[aria-pressed='true'] .tc-name::after {
+  content: ' ✓';
+  color: var(--accent);
+}
+.tc-desc {
+  padding: 0 2px;
+  color: var(--fg-muted);
+  font-size: 11px;
+}
+/* ミニ見本: 変数はカードごとにそのテーマの値が入っている */
+.tc-sample {
+  display: flex;
+  flex-direction: column;
+  height: 92px;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: var(--bg);
+  color: var(--fg);
+  font-size: 10px;
+  line-height: 1.5;
+}
+.tc-bar {
+  display: flex;
+  gap: 4px;
+  padding: 4px 6px;
+  background: var(--bg-sub);
+  border-bottom: 1px solid var(--border);
+}
+.tc-bar i {
+  width: 14px;
+  height: 6px;
+  border-radius: 3px;
+  background: var(--border);
+}
+.tc-bar i.tc-acc {
+  margin-left: auto;
+  width: 22px;
+  background: var(--accent);
+}
+.tc-body {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  flex: 1;
+}
+.tc-ed,
+.tc-pv {
+  display: flex;
+  flex-direction: column;
+  padding: 3px 6px;
+  overflow: hidden;
+  white-space: nowrap;
+}
+.tc-ed {
+  font-family: var(--editor-font);
+  border-right: 1px solid var(--border);
+}
+.tc-pv {
+  background: var(--pv-bg);
+  color: var(--pv-fg);
+}
+.tc-h {
+  color: var(--tk-mark);
+}
+.tc-em {
+  color: var(--tk-emph);
+}
+.tc-code {
+  color: var(--tk-code);
+}
+.tc-hit {
+  background: var(--hit);
+}
+.tc-ph {
+  color: var(--pv-heading);
+  font-weight: 700;
+  font-size: 11px;
+  border-bottom: 1px solid var(--pv-border);
+}
+.tc-pt {
+  color: var(--pv-fg);
+}
+.tc-pl {
+  color: var(--pv-link);
+}
+.td-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.td-note {
+  color: var(--fg-muted);
+  font-size: 12px;
+}
+
+/* ---------------- お知らせ（トースト） ----------------
+   ステータスバーの上に控えめに出し、しばらくすると消える（操作を止めない） */
+#toast {
+  position: fixed;
+  left: 50%;
+  bottom: 36px;
+  z-index: 50;
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  width: max-content;
+  max-width: min(640px, calc(100vw - 32px));
+  padding: 10px 10px 10px 14px;
+  border: 1px solid var(--border);
+  border-left: 4px solid var(--accent);
+  border-radius: 8px;
+  background: var(--bg-sub);
+  color: var(--fg);
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.18);
+  line-height: 1.6;
+  transform: translate(-50%, 0);
+  opacity: 1;
+  transition: opacity 0.2s, transform 0.2s;
+}
+#toast[hidden] {
+  display: none;
+}
+#toast.leaving {
+  opacity: 0;
+  transform: translate(-50%, 8px);
+}
+.toast-icon {
+  flex: none;
+  margin-top: 3px;
+  color: var(--accent);
+}
+.toast-icon circle {
+  fill: none;
+  stroke: currentColor;
+}
+#toast-text {
+  flex: 1;
+  overflow-wrap: anywhere;
+}
+#toast-close {
+  flex: none;
+  width: 24px;
+  height: 24px;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  cursor: pointer;
+}
+#toast-close:hover {
+  background: var(--bg-hover);
+}
+
+/* ---------------- サードパーティのライセンス ---------------- */
+#licenses-dialog {
+  width: min(820px, calc(100vw - 32px));
+  max-height: calc(100vh - 48px);
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg);
+  color: var(--fg);
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.35);
+}
+#licenses-dialog::backdrop {
+  background: rgba(0, 0, 0, 0.4);
+}
+#licenses-text {
+  max-height: calc(100vh - 200px);
+  margin: 0;
+  padding: 12px;
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-sub);
+  font: 12px/1.5 var(--editor-font);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* ---------------- 設定画面 ---------------- */
+/* ---------------- Markdown 記法の一覧 ---------------- */
+#syntax-dialog {
+  width: min(980px, calc(100vw - 32px));
+  max-height: calc(100vh - 48px);
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg);
+  color: var(--fg);
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.35);
+}
+#syntax-dialog::backdrop {
+  background: rgba(0, 0, 0, 0.4);
+}
+#syntax-dialog .td-inner {
+  max-height: calc(100vh - 50px);
+}
+.syn-host {
+  min-height: 0;
+  max-height: calc(100vh - 200px);
+  overflow: auto;
+  padding-right: 6px;
+}
+
+#settings-dialog {
+  width: min(560px, calc(100vw - 32px));
+  max-height: calc(100vh - 48px);
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg);
+  color: var(--fg);
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.35);
+}
+#settings-dialog::backdrop {
+  background: rgba(0, 0, 0, 0.4);
+}
+.sd-inner {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  padding: 16px 20px;
+}
+.sd-section {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 8px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+}
+.sd-section h3 {
+  margin: 0;
+  font-size: 13px;
+  color: var(--fg-muted);
+}
+.sd-check {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+}
+.sd-check input {
+  width: 16px;
+  height: 16px;
+  accent-color: var(--accent);
+}
+.sd-help {
+  margin: 0;
+  color: var(--fg-muted);
+  font-size: 12px;
+  line-height: 1.6;
+}

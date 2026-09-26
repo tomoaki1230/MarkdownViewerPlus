@@ -1,0 +1,216 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="utf-8" />
+    <!-- スクリプトは自前のバンドルのみ。Markdown 中の <script> は DOMPurify で除去した上で CSP でも実行させない -->
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' file: data: https: http:; media-src 'self' file: data: https: http:; font-src 'self' data:"
+    />
+    <title>MarkdownViewerPlus</title>
+    <link rel="stylesheet" href="app.css" />
+    <!-- 最初の描画より前にテーマの色を当てる（アプリ本体より先に、同期で実行） -->
+    <script src="boot.bundle.js"></script>
+  </head>
+  <body class="is-loading">
+    <header id="toolbar">
+      <!-- 1 段目: 常に表示（保存 ｜ 拡大縮小・検索 … モード切替・明暗） -->
+      <div class="tb-row" id="tb-main">
+        <!-- 左: ファイル操作など（ウィンドウが狭いときは後ろのボタンから隠れる） -->
+        <div class="tb-left">
+          <button id="btn-save" class="tb-btn" title="保存 (Ctrl+S)" disabled>
+            <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M2.5 2.5h9l2 2v9h-11z M5 2.5v4h6v-4 M5 13.5v-4h6v4" /></svg>
+            <span>保存</span>
+          </button>
+          <button id="btn-save-as" class="tb-btn" title="名前を付けて保存 (Ctrl+Shift+S)。文字コード・改行コードは元のまま保存します" disabled>
+            <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M2.5 2.5h7l2 2v3 M2.5 2.5v11h5 M5 2.5v3.5h4.5v-3.5" /><path d="M9.5 14.5l1-3 4-4 2 2-4 4z" /></svg>
+            <span>別名で保存</span>
+          </button>
+          <span class="sep"></span>
+          <button id="btn-reload" class="tb-btn icon-only" title="ファイルから再読み込み (F5)" aria-label="再読み込み" disabled>
+            <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M13 8a5 5 0 11-1.5-3.5 M13 2.5v3h-3" /></svg>
+          </button>
+          <button id="btn-auto-reload" class="tb-btn icon-only toggle" title="自動再読み込み（ファイルが外部で変更されたら自動で読み直す）" aria-label="自動再読み込み" aria-pressed="true" disabled>
+            <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M13 8a5 5 0 11-1.5-3.5 M13 2.5v3h-3" /><circle cx="8" cy="8" r="1.6" /></svg>
+          </button>
+          <span class="sep"></span>
+          <button id="btn-breaks" class="tb-btn icon-only toggle" title="改行で折り返す（行末の半角スペース 2 つが無くても、改行で改行して表示）" aria-label="改行で折り返す" aria-pressed="false" disabled>
+            <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M2 4h11.5a1.5 1.5 0 010 3H9 M2 11h5 M10.5 5.5L9 7l1.5 1.5" /></svg>
+          </button>
+          <button id="btn-width" class="tb-btn icon-only" title="表示幅（プレビューの本文の幅）" aria-label="表示幅" aria-haspopup="menu" disabled>
+            <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M1.5 3v10 M14.5 3v10 M4 8h8 M6 6L4 8l2 2 M10 6l2 2-2 2" /></svg>
+          </button>
+          <span class="sep"></span>
+          <div class="zoom" role="group" aria-label="拡大縮小">
+            <button id="btn-zoom-out" title="縮小 (Ctrl+-)" aria-label="縮小" disabled>
+              <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3.5 8h9" /></svg>
+            </button>
+            <button id="btn-zoom-reset" title="標準サイズに戻す (Ctrl+0)" disabled>100%</button>
+            <button id="btn-zoom-in" title="拡大 (Ctrl++)" aria-label="拡大" disabled>
+              <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3.5 8h9M8 3.5v9" /></svg>
+            </button>
+          </div>
+          <button id="btn-find" class="tb-btn" title="検索 (Ctrl+F)。表示モードは表示内容を、編集モード・2ペインは編集側を検索します" aria-pressed="false" disabled>
+            <svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="7" cy="7" r="4.5" style="fill:none;stroke:currentColor" /><path d="M10.5 10.5l4 4" /></svg>
+            <span>検索</span>
+          </button>
+        </div>
+        <!-- 右: モード切替・明暗（ウィンドウが狭くても常に見える） -->
+        <div class="tb-right">
+          <div class="mode-switch" role="group" aria-label="表示モード">
+            <button data-mode="view" aria-pressed="false" disabled title="表示モード (Ctrl+1)">
+              <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M1 8s2.5-5 7-5 7 5 7 5-2.5 5-7 5-7-5-7-5z" /><circle cx="8" cy="8" r="2" /></svg>
+              <span>表示</span>
+            </button>
+            <button data-mode="edit" aria-pressed="false" disabled title="編集モード (Ctrl+2)">
+              <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M10.5 2.5l3 3-8 8h-3v-3z M9 4l3 3" /></svg>
+              <span>編集</span>
+            </button>
+            <button data-mode="split" aria-pressed="false" disabled title="編集＋表示の2ペイン (Ctrl+3)">
+              <svg viewBox="0 0 16 16" aria-hidden="true"><rect x="1.5" y="2.5" width="13" height="11" rx="1" /><path d="M8 2.5v11" /></svg>
+              <span>2ペイン</span>
+            </button>
+          </div>
+          <button id="btn-theme" class="tb-btn icon-only" title="テーマ（明暗とカラーテーマを選ぶ）" aria-label="テーマ" aria-haspopup="dialog">
+            <svg class="ic-system" viewBox="0 0 16 16" aria-hidden="true"><rect x="1.5" y="2.5" width="13" height="9" rx="1" /><path d="M5.5 14h5M8 11.5V14" /></svg>
+            <svg class="ic-light" viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="3" style="fill:none;stroke:currentColor" /><path d="M8 1v2M8 13v2M1 8h2M13 8h2M3 3l1.4 1.4M11.6 11.6L13 13M3 13l1.4-1.4M11.6 4.4L13 3" /></svg>
+            <svg class="ic-dark" viewBox="0 0 16 16" aria-hidden="true"><path d="M13.5 10A6 6 0 016 2.5a6 6 0 107.5 7.5z" /></svg>
+          </button>
+        </div>
+      </div>
+
+      <!-- 2 段目: 編集モード / 2ペインのときだけ表示（編集に関するボタン） -->
+      <div class="tb-row" id="tools" role="toolbar" aria-label="編集">
+        <button data-action="undo" title="元に戻す (Ctrl+Z)">
+          <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4 6.5h6.5a3 3 0 010 6H7 M6.5 3.5l-3 3 3 3" /></svg>
+        </button>
+        <button data-action="redo" title="やり直し (Ctrl+Y)">
+          <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M12 6.5H5.5a3 3 0 000 6H9 M9.5 3.5l3 3-3 3" /></svg>
+        </button>
+        <span class="sep"></span>
+        <button data-tool="heading" title="見出し（# → ## → ### → なし）"><b>H</b></button>
+        <button data-tool="bold" title="太字 (Ctrl+B)"><b>B</b></button>
+        <button data-tool="italic" title="斜体 (Ctrl+I)"><i>I</i></button>
+        <button data-tool="strike" title="取り消し線"><s>S</s></button>
+        <button data-tool="code" title="インラインコード"><code>&lt;/&gt;</code></button>
+        <span class="sep"></span>
+        <button data-tool="link" title="リンク">
+          <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M6.5 9.5l3-3M7 4.5l1-1a2.5 2.5 0 013.5 3.5l-1 1M9 11.5l-1 1a2.5 2.5 0 01-3.5-3.5l1-1" /></svg>
+        </button>
+        <button data-tool="ul" title="箇条書き">
+          <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M6 4h8M6 8h8M6 12h8" /><circle cx="2.5" cy="4" r="1" /><circle cx="2.5" cy="8" r="1" /><circle cx="2.5" cy="12" r="1" /></svg>
+        </button>
+        <button data-tool="ol" title="番号付きリスト">
+          <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M6 4h8M6 8h8M6 12h8" /><text x="0.5" y="6" font-size="5">1</text><text x="0.5" y="10" font-size="5">2</text><text x="0.5" y="14" font-size="5">3</text></svg>
+        </button>
+        <button data-tool="task" title="タスクリスト">
+          <svg viewBox="0 0 16 16" aria-hidden="true"><rect x="1.5" y="2.5" width="4" height="4" /><path d="M8 4.5h6.5M8 11.5h6.5M1.8 11.2l1.4 1.4 2.6-3" /></svg>
+        </button>
+        <button data-tool="quote" title="引用">
+          <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M2.5 2.5v11M6 5h8M6 8h8M6 11h5" /></svg>
+        </button>
+        <button data-tool="codeblock" title="コードブロック">
+          <svg viewBox="0 0 16 16" aria-hidden="true"><rect x="1.5" y="2.5" width="13" height="11" rx="1" /><path d="M6 6L4 8l2 2M10 6l2 2-2 2" /></svg>
+        </button>
+        <button data-tool="hr" title="水平線">
+          <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M1.5 8h13" /></svg>
+        </button>
+      </div>
+    </header>
+
+    <div id="banner" role="alert" hidden>
+      <span id="banner-text"></span>
+      <button id="banner-reload">再読み込み</button>
+      <button id="banner-close" title="閉じる" aria-label="閉じる">×</button>
+    </div>
+
+    <main id="workspace">
+      <!-- 検索バー: 表示モードはプレビュー、編集モード / 2ペインは編集側が対象 -->
+      <div id="search" hidden>
+        <!-- 1 段目: 検索語と閉じる / 2 段目: オプション・件数・前後の移動 -->
+        <div class="search-row">
+          <input id="search-input" type="text" placeholder="検索" spellcheck="false" autocomplete="off" />
+          <button id="search-close" class="icon" title="閉じる (Esc)">×</button>
+        </div>
+        <div class="search-row">
+          <button id="search-case" class="opt" aria-pressed="false" title="大文字と小文字を区別">Aa</button>
+          <button id="search-word" class="opt" aria-pressed="false" title="単語単位"><u>ab</u></button>
+          <button id="search-regex" class="opt" aria-pressed="false" title="正規表現">.*</button>
+          <span id="search-count" aria-live="polite"></span>
+          <button id="search-prev" class="icon" title="前へ (Shift+Enter / Shift+F3)">↑</button>
+          <button id="search-next" class="icon" title="次へ (Enter / F3)">↓</button>
+        </div>
+      </div>
+      <section id="editor-pane">
+        <div id="editor">
+          <pre id="ed-mirror" aria-hidden="true"></pre>
+          <div id="ed-ruler" class="hit-ruler" aria-hidden="true" hidden></div>
+          <textarea id="ed-input" spellcheck="false" autocomplete="off" autocapitalize="off" wrap="soft" aria-label="Markdown ソース"></textarea>
+        </div>
+      </section>
+      <div id="splitter" role="separator" aria-orientation="vertical" title="ドラッグで幅を変更（ダブルクリックで中央に戻す）"><span class="grip"></span></div>
+      <section id="preview-pane">
+        <div id="preview" tabindex="0"></div>
+        <div id="pv-ruler" class="hit-ruler" aria-hidden="true" hidden></div>
+      </section>
+    </main>
+
+    <div id="empty">
+      <div class="empty-inner">
+        <div class="empty-box">
+          <p class="empty-title">Markdown ファイルをここにドロップ</p>
+          <p>または</p>
+          <button id="empty-open" class="tb-btn primary">ファイルを開く… (Ctrl+O)</button>
+        </div>
+        <section id="recent" hidden>
+          <div class="recent-head">
+            <h2>最近開いたファイル</h2>
+            <button id="recent-clear" class="link-btn">履歴をクリア</button>
+          </div>
+          <ul id="recent-list"></ul>
+        </section>
+      </div>
+    </div>
+
+    <!-- お知らせ（開かなかったファイル等）。ダイアログで操作を止めず、しばらくすると消える -->
+    <div id="toast" role="status" aria-live="polite" hidden>
+      <svg class="toast-icon" viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="6.5" /><path d="M8 7v4.5M8 4.6v.1" /></svg>
+      <span id="toast-text"></span>
+      <button id="toast-close" title="閉じる" aria-label="閉じる">×</button>
+    </div>
+
+    <footer id="status">
+      <span id="st-path" class="st-item"></span>
+      <span id="st-message" class="st-item"></span>
+      <span class="spacer"></span>
+      <span id="st-dirty" class="st-item" hidden>● 未保存</span>
+      <span id="st-readonly" class="st-item" hidden>読み取り専用</span>
+      <span id="st-search" class="st-item" hidden></span>
+      <span id="st-pos" class="st-item"></span>
+      <span id="st-chars" class="st-item"></span>
+      <span id="st-mode" class="st-item"></span>
+      <span id="st-encoding" class="st-item" title="文字コード（保存時も変更しません）"></span>
+      <span id="st-eol" class="st-item" title="改行コード（保存時も変更しません）"></span>
+    </footer>
+
+    <!-- カラーテーマの選択画面（中身は theme-picker.js が作る） -->
+    <dialog id="theme-dialog"></dialog>
+    <!-- 設定画面（中身は settings-dialog.js が作る） -->
+    <dialog id="settings-dialog"></dialog>
+    <!-- ヘルプ > Markdown 記法の一覧（中身は syntax-help.js が作る） -->
+    <dialog id="syntax-dialog"></dialog>
+    <!-- ヘルプ > サードパーティのライセンス -->
+    <dialog id="licenses-dialog" aria-labelledby="licenses-title">
+      <form method="dialog" class="td-inner">
+        <header class="td-head">
+          <h2 id="licenses-title">サードパーティのライセンス</h2>
+          <button class="td-close" value="close" aria-label="閉じる">×</button>
+        </header>
+        <pre id="licenses-text"></pre>
+        <footer class="td-foot"><span></span><button class="tb-btn primary" value="close">閉じる</button></footer>
+      </form>
+    </dialog>
+
+    <script src="app.bundle.js"></script>
+  </body>
+</html>

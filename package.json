@@ -1,0 +1,106 @@
+{
+  "name": "markdown-viewer-plus",
+  "version": "1.0.0",
+  "description": "コードレビュワー向けの「直せる」Markdownビューア",
+  "main": "src/main/main.js",
+  "type": "module",
+  "author": "Tomoaki Bessho",
+  "license": "MIT",
+  "private": true,
+  "dependencies": {
+    "encoding-japanese": "^2.4.0"
+  },
+  "devDependencies": {
+    "dompurify": "^3.4.16",
+    "electron": "^44.4.5",
+    "electron-builder": "^26.15.3",
+    "esbuild": "^0.28.2",
+    "gemoji": "^8.1.0",
+    "highlight.js": "^11.12.0",
+    "jsdom": "^30.1.1",
+    "marked": "^18.0.14"
+  },
+  "allowScripts": {
+    "esbuild@0.28.2": true,
+    "electron-winstaller@5.4.0": true
+  },
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "build:dev": "node scripts/build.mjs --dev",
+    "watch": "node scripts/build.mjs --watch",
+    "start": "npm run build:dev && node scripts/run-electron.mjs",
+    "test": "node --test \"test/unit/*.test.js\"",
+    "test:e2e": "npm run build && node test/e2e/smoke.mjs",
+    "dist:win": "npm run build && node scripts/check-win-build.mjs && electron-builder --win",
+    "dist:win:zip": "npm run build && electron-builder --win zip",
+    "dist:dir": "npm run build && electron-builder --dir",
+    "setup:wsl-libs": "bash scripts/setup-wsl-libs.sh"
+  },
+  "build": {
+    "appId": "com.markdownviewerplus.app",
+    "productName": "MarkdownViewerPlus",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "src/main/**/*",
+      "src/preload/**/*",
+      "src/shared/**/*",
+      "dist/renderer/**/*",
+      "assets/**/*",
+      "package.json"
+    ],
+    "fileAssociations": [
+      {
+        "ext": [
+          "md",
+          "markdown",
+          "mdown",
+          "mkd",
+          "mkdn"
+        ],
+        "name": "Markdown",
+        "description": "Markdown ファイル",
+        "role": "Editor"
+      }
+    ],
+    "win": {
+      "icon": "assets/icon.png",
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "zip",
+          "arch": [
+            "x64"
+          ]
+        }
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true
+    },
+    "linux": {
+      "icon": "assets/icon.png",
+      "target": [
+        "dir"
+      ]
+    },
+    "electronLanguages": [
+      "ja",
+      "en-US"
+    ]
+  }
+}
