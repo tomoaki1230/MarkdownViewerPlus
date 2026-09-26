@@ -46,8 +46,10 @@ test('.ico: 各サイズが並び、256px は PNG・それ未満はビットマ�
   assert.equal(ico.toString('latin1', png + 1, png + 4), 'PNG');
 });
 
-test('アプリのアイコンから全サイズ入りの .ico を作れる', () => {
-  const ico = makeIco(fs.readFileSync(path.join(root, 'assets', 'icon.png')));
-  const sizes = Array.from({ length: ico.readUInt16LE(4) }, (_, i) => ico[6 + 16 * i] || 256);
-  assert.deepEqual(sizes, ICO_SIZES);
+test('アプリのアイコン・ファイル用のアイコンから全サイズ入りの .ico を作れる', () => {
+  for (const name of ['icon.png', 'file-icon.png']) {
+    const ico = makeIco(fs.readFileSync(path.join(root, 'assets', name)));
+    const sizes = Array.from({ length: ico.readUInt16LE(4) }, (_, i) => ico[6 + 16 * i] || 256);
+    assert.deepEqual(sizes, ICO_SIZES, name);
+  }
 });

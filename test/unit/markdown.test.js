@@ -161,3 +161,71 @@ test('小さい段落・改行の無い長文・改行して表示する設定�
     md.setBreaks(false);
   }
 });
+
+test('GitHub のアラート: 5 種類の見出しと中身、普通の引用・行の途中の [!NOTE] はアラートにしない', () => {
+  const labels = { NOTE: '注記', TIP: 'ヒント', IMPORTANT: '重要', WARNING: '警告', CAUTION: '注意' };
+  for (const [type, label] of Object.entries(labels)) {
+    const d = dom(md.render(`> [!${type}]\n> 本文 **太字**\n> - 箇条書き`));
+    const alert = d.querySelector(`.markdown-alert.markdown-alert-${type.toLowerCase()}`);
+    assert.ok(alert, type);
+    assert.equal(alert.querySelector('.markdown-alert-title').textContent, label);
+    assert.equal(alert.querySelector('strong').textContent, '太字');
+    assert.equal(alert.querySelectorAll('li').length, 1);
+    assert.equal(d.querySelector('blockquote'), null);
+  }
+  // 小文字でもよい（GitHub と同じ）
+  assert.ok(dom(md.render('> [!note]\n> 本文')).querySelector('.markdown-alert-note'));
+  // 普通の引用・1 行目に他の文字がある・知らない種類はアラートにしない
+  for (const src of ['> 引用', '> 注意 [!NOTE]', '> [!NOTE] 同じ行の文章', '> [!INFO]\n> 本文']) {
+    const d = dom(md.render(src));
+    assert.equal(d.querySelector('.markdown-alert'), null, src);
+    assert.ok(d.querySelector('blockquote'), src);
+  }
+  // アラートにも data-line が付く（スクロール同期）
+  assert.equal(dom(md.render('# a\n\n> [!TIP]\n> b')).querySelector('.markdown-alert').dataset.line, '2');
+});
+
+test('脚注: 参照順の番号・戻りリンク・何度も参照・定義の無い参照・続きの行・参照されない定義', () => {
+  const d = dom(
+    md.render('本文[^b]と[^a]と[^b]と[^none]\n\n[^a]: A の脚注\n[^b]: B の脚注\n    続きの行\n[^unused]: 使われない\n'),
+  );
+  const refs = [...d.querySelectorAll('sup.footnote-ref a')].map((a) => [a.textContent, a.getAttribute('href'), a.id]);
+  assert.deepEqual(refs, [
+    ['1', '#mvp-fn-1', 'mvp-fnref-1'],
+    ['2', '#mvp-fn-2', 'mvp-fnref-2'],
+    ['1', '#mvp-fn-1', 'mvp-fnref-1-2'],
+  ]);
+  assert.match(d.querySelector('p').textContent, /\[\^none\]/, '定義の無い参照は文字のまま');
+  const items = [...d.querySelectorAll('section.footnotes li')];
+  assert.deepEqual(
+    items.map((li) => li.id),
+    ['mvp-fn-1', 'mvp-fn-2'],
+    '参照された脚注だけ、参照された順',
+  );
+  assert.match(items[0].textContent, /B の脚注\s+続きの行/);
+  assert.deepEqual(
+    [...items[0].querySelectorAll('.footnote-backref')].map((a) => a.getAttribute('href')),
+    ['#mvp-fnref-1', '#mvp-fnref-1-2'],
+  );
+  // 定義は本文の位置には出さない。脚注が無ければ一覧も出さない
+  assert.doesNotMatch(d.textContent.split('A の脚注')[0], /使われない/);
+  assert.equal(dom(md.render('本文だけ')).querySelector('.footnotes'), null);
+  // 脚注の中の参照リンクの定義は本文と共通
+  const withRef = dom(md.render('x[^1]\n\n[^1]: [参照][r]\n\n[r]: https://example.com/'));
+  assert.equal(withRef.querySelector('.footnotes a[href="https://example.com/"]')?.textContent, '参照');
+});
+
+test('脚注の id は文書中の HTML からは名乗れない（mvp-fn の id は取り除く。印を推測しても無効）。他の id はそのまま', () => {
+  const d = dom(
+    md.render('本文[^1]\n\n<div id="mvp-fn-1">偽物</div><a id="mvp-fnref-1" data-mvp-own="guess">偽</a> <span id="fn-1">ふつう</span>\n\n[^1]: 脚注\n'),
+  );
+  assert.deepEqual(
+    [...d.querySelectorAll('[id^="mvp-fn"]')].map((e) => [e.tagName, e.id]),
+    [
+      ['A', 'mvp-fnref-1'],
+      ['LI', 'mvp-fn-1'],
+    ],
+  );
+  assert.equal(d.querySelector('#fn-1').textContent, 'ふつう');
+  assert.equal(d.querySelector('[data-mvp-own]'), null, '印は表示に残さない');
+});

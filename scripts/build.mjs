@@ -4,6 +4,7 @@
 //   app.bundle.js  … marked / DOMPurify / 絵文字 / アプリ本体（起動時に読み込む）
 //   hljs.bundle.js … highlight.js（本文を描画した後に遅延ロード）
 // あわせて、assets/icon.png から複数サイズ入りの dist/icon.ico を作る（Windows のウィンドウ・トレイ・exe のアイコン）
+// assets/file-icon.png からは dist/file-icon.ico を作る（インストーラが関連付けた .md ファイルのアイコン）
 import * as esbuild from 'esbuild';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -117,6 +118,7 @@ const entries = [
 copyStatic();
 writeThirdPartyLicenses();
 fs.writeFileSync(path.join(root, 'dist', 'icon.ico'), makeIco(fs.readFileSync(path.join(root, 'assets', 'icon.png'))));
+fs.writeFileSync(path.join(root, 'dist', 'file-icon.ico'), makeIco(fs.readFileSync(path.join(root, 'assets', 'file-icon.png'))));
 if (watch) {
   for (const e of entries) {
     const ctx = await esbuild.context({ ...common, ...e });

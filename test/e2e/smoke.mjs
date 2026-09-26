@@ -168,10 +168,15 @@ try {
   // ダイアログは操作より先に差し替える（呼ばれた内容は記録して後で確認する）
   await main.evaluate(`(() => {
     globalThis.__dialogCalls = [];
+    // メニューのラベルはアクセスキーを見せるためにゼロ幅スペースを含む（menu.js）。比べるときは取り除く
+    globalThis.__plain = (label) => String(label).replaceAll('\\u200B', '');
     const d = globalThis.__mvp.dialog;
     d.showMessageBox = async (_w, opts) => { globalThis.__dialogCalls.push(opts ?? _w); return { response: 0 }; };
     d.showMessageBoxSync = (_w, opts) => { globalThis.__dialogCalls.push(opts ?? _w); return 0; };
     d.showOpenDialog = async () => ({ canceled: true, filePaths: [] });
+    // 予期しないエラーのダイアログは画面に出さず記録する（出たらテストの失敗として最後に確かめる）
+    globalThis.__errorBoxes = [];
+    d.showErrorBox = (title, content) => { globalThis.__errorBoxes.push(title + ' ' + content); process.stdout.write('[E2E-ERRORBOX] ' + title + ' ' + content + '\\n'); };
     return true;
   })()`);
 
@@ -214,7 +219,7 @@ try {
       let items = globalThis.__mvp.visibleContexts()[0].menu?.items ?? [];
       let item = null;
       for (const label of ${JSON.stringify(labels)}) {
-        item = items.find((i) => i.label === label);
+        item = items.find((i) => __plain(i.label) === label);
         items = item?.submenu?.items ?? [];
       }
       return item ? { enabled: item.enabled, checked: item.checked } : null;
@@ -224,7 +229,7 @@ try {
       let items = globalThis.__mvp.visibleContexts()[0].menu.items;
       let item = null;
       for (const label of ${JSON.stringify(labels)}) {
-        item = items.find((i) => i.label === label);
+        item = items.find((i) => __plain(i.label) === label);
         items = item?.submenu?.items ?? [];
       }
       item.click();
@@ -232,22 +237,22 @@ try {
     })()`);
 
   await step('メニューバー: ファイル・編集・表示・ヘルプ（書式・モード切替・拡大縮小・置換は無い）', async () => {
-    const labels = await main.evaluate('globalThis.__mvp.visibleContexts()[0].menu?.items.map((i) => i.label)');
+    const labels = await main.evaluate('globalThis.__mvp.visibleContexts()[0].menu?.items.map((i) => __plain(i.label))');
     assert.deepEqual(labels, ['ファイル(&F)', '編集(&E)', '表示(&V)', 'ヘルプ(&H)']);
-    const view = await main.evaluate(`globalThis.__mvp.visibleContexts()[0].menu.items[2].submenu.items.map((i) => i.label).filter(Boolean)`);
-    assert.deepEqual(view, ['テーマ(&T)...']);
-    const edit = await main.evaluate(`globalThis.__mvp.visibleContexts()[0].menu.items[1].submenu.items.map((i) => i.label)`);
+    const view = await main.evaluate(`globalThis.__mvp.visibleContexts()[0].menu.items[2].submenu.items.map((i) => __plain(i.label)).filter(Boolean)`);
+    assert.deepEqual(view, ['テーマ(&T)...', 'フォントと行間(&F)...']);
+    const edit = await main.evaluate(`globalThis.__mvp.visibleContexts()[0].menu.items[1].submenu.items.map((i) => __plain(i.label))`);
     assert.equal(edit.some((l) => l.includes('置換')), false);
   });
 
-  await step('ツールバー 1 段目の並び: 保存 ｜ 拡大縮小・検索 … モード切替・明暗（右端）、開くボタンは無い', async () => {
+  await step('ツールバー 1 段目の並び: 保存 ｜ 拡大縮小・検索 … モード切替（右端）、開くボタン・テーマのボタンは無い', async () => {
     const order = await q(`({
       left: [...document.querySelectorAll('#tb-main > .tb-left > *')].map((e) => e.id || e.className),
       right: [...document.querySelectorAll('#tb-main > .tb-right > *')].map((e) => e.id || e.className),
     })`);
     assert.deepEqual(order, {
-      left: ['btn-save', 'btn-save-as', 'sep', 'btn-reload', 'btn-auto-reload', 'sep', 'btn-breaks', 'btn-width', 'sep', 'zoom', 'btn-find'],
-      right: ['mode-switch', 'btn-theme'],
+      left: ['btn-save', 'btn-save-as', 'sep', 'btn-reload', 'btn-auto-reload', 'sep', 'btn-toc', 'btn-breaks', 'btn-width', 'sep', 'zoom', 'btn-find'],
+      right: ['mode-switch'],
     });
     assert.equal(await q(`document.querySelector('#btn-open')`), null);
   });
@@ -417,7 +422,7 @@ try {
   await step('最近開いたファイル: 開いたファイルが記録され、メニューと空の画面の一覧に出る', async () => {
     const saved = JSON.parse(fs.readFileSync(path.join(work, 'userData', 'settings.json'), 'utf8'));
     assert.deepEqual(saved.recent, [samplePath]);
-    const items = await main.evaluate(`globalThis.__mvp.visibleContexts()[0].menu.items[0].submenu.items.find((i) => i.label.startsWith('最近開いたファイル')).submenu.items.map((i) => i.label)`);
+    const items = await main.evaluate(`globalThis.__mvp.visibleContexts()[0].menu.items[0].submenu.items.find((i) => i.label.startsWith('最近開いたファイル')).submenu.items.map((i) => __plain(i.label))`);
     assert.match(items[0], /^&1 sample\.md/);
     assert.ok(items.includes('履歴をクリア(&C)'));
     const list = await q(`[...document.querySelectorAll('#recent-list .recent-name')].map((e) => e.textContent)`);
@@ -446,6 +451,46 @@ try {
     const lines = await q(`document.querySelectorAll('#ed-mirror > .ed-line').length`);
     const expected = await q(`document.querySelector('#ed-input').value.split('\\n').length`);
     assert.equal(lines, expected);
+  });
+
+  await step('行番号の欄: 桁数・拡大率が変わっても、背景の帯・行番号・本文の開始位置がずれない', async () => {
+    const measure = (zoom) => q(`(async () => {
+      document.documentElement.style.setProperty('--zoom', '${zoom}');
+      await new Promise((r) => setTimeout(r, 50));
+      const mirror = document.querySelector('#ed-mirror');
+      const probe = document.createElement('div');
+      probe.style.cssText = 'position:absolute;visibility:hidden;width:var(--gutter)';
+      mirror.append(probe);
+      const stripe = probe.getBoundingClientRect().width;
+      probe.remove();
+      const textStart = parseFloat(getComputedStyle(mirror).paddingLeft);
+      const last = mirror.lastElementChild;
+      const before = getComputedStyle(last, '::before');
+      const num = document.createElement('span');
+      num.style.cssText = 'position:absolute;visibility:hidden;white-space:nowrap;font-size:' + before.fontSize + ';font-family:' + before.fontFamily;
+      num.textContent = String(mirror.children.length);
+      last.append(num);
+      const numWidth = num.getBoundingClientRect().width;
+      num.remove();
+      return {
+        stripeMatches: Math.abs(stripe - textStart) < 0.5,
+        numberFits: numWidth <= parseFloat(before.width) + 0.5,
+        inputMatches: Math.abs(textStart - parseFloat(getComputedStyle(document.querySelector('#ed-input')).paddingLeft)) < 0.1,
+      };
+    })()`);
+    await q(`document.querySelector('[data-mode=edit]').click()`);
+    // 帯は行番号・本文と同じフォントの鏡に描く（外側の #editor に描くと、UI のフォントの文字幅で計算されてずれる）
+    assert.deepEqual(
+      await q(`[getComputedStyle(document.querySelector('#ed-mirror')).backgroundImage.includes('linear-gradient'), getComputedStyle(document.querySelector('#editor')).backgroundImage]`),
+      [true, 'none'],
+    );
+    const ok = { stripeMatches: true, numberFits: true, inputMatches: true };
+    for (const z of ['0.5', '1', '3']) assert.deepEqual(await measure(z), ok, `拡大率 ${z}`);
+    // 1 万行を超える（5 桁の）文書でも同じ
+    const original = await q(`document.querySelector('#ed-input').value`);
+    await q(`(() => { const ta = document.querySelector('#ed-input'); ta.value = Array.from({ length: 12000 }, (_, i) => 'x' + i).join('\\n'); ta.dispatchEvent(new Event('input')); return true; })()`);
+    for (const z of ['1', '3']) assert.deepEqual(await measure(z), ok, `5 桁・拡大率 ${z}`);
+    await q(`(() => { const ta = document.querySelector('#ed-input'); ta.value = ${JSON.stringify(original)}; ta.dispatchEvent(new Event('input')); document.documentElement.style.setProperty('--zoom', '1'); return true; })()`);
   });
 
   await step('鏡と textarea の文字位置が重なっている（折り返し・行の高さが一致）', async () => {
@@ -589,19 +634,15 @@ try {
     assert.equal(await q(`document.querySelector('#ed-input').value.startsWith('X')`), true);
   });
 
-  await step('テーマ: 明暗の入口はテーマ画面 1 つ（ツールバーのボタンも 表示 > テーマ... も同じ画面を開く）', async () => {
+  await step('テーマ: 明暗とカラーテーマは 表示 > テーマ... の画面 1 つで選ぶ（ツールバーにテーマのボタンは無い）', async () => {
     const dark = () => q(`matchMedia('(prefers-color-scheme: dark)').matches`);
-    // ツールバーの明暗ボタンはテーマ画面を開く（押しても明暗は変わらない）
+    assert.equal(await q(`document.querySelector('#btn-theme')`), null);
     const before = await q(`document.body.dataset.theme`);
-    await q(`document.querySelector('#btn-theme').click()`);
-    await waitFor(() => q(`document.querySelector('#theme-dialog').open`), { label: 'テーマ画面（ツールバー）' });
-    assert.equal(await q(`document.body.dataset.theme`), before);
-    assert.equal(await q(`document.querySelector('#theme-dialog-title').textContent`), 'テーマ');
-    assert.equal(await q(`document.querySelector('#theme-dialog .td-mode-label').textContent`), 'Windowsテーマ');
-    await q(`document.querySelector('#theme-dialog').close()`);
-    // 表示メニューからも同じ画面
     await clickMenu(['表示(&V)', 'テーマ(&T)...']);
     await waitFor(() => q(`document.querySelector('#theme-dialog').open`), { label: 'テーマ画面（メニュー）' });
+    assert.equal(await q(`document.body.dataset.theme`), before, '開くだけでは明暗は変わらない');
+    assert.equal(await q(`document.querySelector('#theme-dialog-title').textContent`), 'テーマ');
+    assert.equal(await q(`document.querySelector('#theme-dialog .td-mode-label').textContent`), 'Windowsテーマ');
     // 画面の明暗ボタンで切り替え、設定が保存される
     await q(`document.querySelector('.td-mode-btn[data-mode=dark]').click()`);
     await waitFor(() => q(`document.body.dataset.theme === 'dark'`), { label: 'ダーク' });
@@ -613,8 +654,6 @@ try {
     assert.equal(await q(`getComputedStyle(document.body).backgroundColor`), 'rgb(255, 255, 255)');
     const saved = JSON.parse(fs.readFileSync(path.join(work, 'userData', 'settings.json'), 'utf8'));
     assert.equal(saved.theme, 'light');
-    // ツールバーのアイコンは今の明暗を表す
-    assert.equal(await q(`getComputedStyle(document.querySelector('#btn-theme .ic-light')).display`), 'block');
     await q(`document.querySelector('.td-mode-btn[data-mode=system]').click()`);
     await waitFor(() => q(`document.body.dataset.theme === 'system'`), { label: 'システムに戻す' });
     await q(`document.querySelector('#theme-dialog').close()`);
@@ -751,7 +790,7 @@ try {
           const buttons = [...ids.map((s) => document.querySelector(s)), ...document.querySelectorAll('.mode-switch button')];
           return {
             // 1 段目のボタンは隠さず、非活性で見せる（明暗ボタンだけは文書に関係なく使える）
-            toolbar: buttons.every((b) => b.offsetParent !== null && b.disabled) && !document.querySelector('#btn-theme').disabled,
+            toolbar: buttons.every((b) => b.offsetParent !== null && b.disabled),
             empty: document.body.classList.contains('is-empty'),
             disabled: ['#btn-zoom-in', '#btn-zoom-out', '#btn-zoom-reset'].map((s) => document.querySelector(s).disabled),
             unchanged: document.querySelector('#btn-zoom-reset').textContent === before,
@@ -915,7 +954,7 @@ try {
     const enabled = await waitFor(
       () =>
         main.evaluate(`(() => {
-          const item = (c) => c.menu?.items.find((m) => m.label === 'ファイル(&F)').submenu.items.find((m) => m.label === '新しいウィンドウ(&N)').enabled;
+          const item = (c) => c.menu?.items.find((m) => __plain(m.label) === 'ファイル(&F)').submenu.items.find((m) => __plain(m.label) === '新しいウィンドウ(&N)').enabled;
           const list = globalThis.__mvp.visibleContexts();
           const r = { empty: item(list.find((x) => !x.doc)), doc: item(list.find((x) => x.doc)) };
           return r.empty === false ? r : null;
@@ -1057,11 +1096,13 @@ try {
         emoji: out('絵文字')?.querySelector('.emoji')?.textContent,
         task: out('タスクリスト')?.querySelectorAll('input[type=checkbox]').length,
         unsafe: !!root.querySelector('script, [onclick]'),
-        unsupported: root.querySelector('.syn-unsupported')?.textContent.includes('脚注'),
+        alert: !!out('アラート')?.querySelector('.markdown-alert-note .markdown-alert-title'),
+        footnote: !!out('脚注')?.querySelector('.footnotes li#mvp-fn-1'),
+        unsupported: root.querySelector('.syn-unsupported')?.textContent.includes('数式') && !root.querySelector('.syn-unsupported').textContent.includes('脚注'),
       };
     })()`);
     assert.ok(r.rows >= 20, `記法の数: ${r.rows}`);
-    assert.deepEqual({ ...r, rows: undefined }, { rows: undefined, table: true, details: true, kbd: 2, emoji: '😄', task: 2, unsafe: false, unsupported: true });
+    assert.deepEqual({ ...r, rows: undefined }, { rows: undefined, table: true, details: true, kbd: 2, emoji: '😄', task: 2, unsafe: false, alert: true, footnote: true, unsupported: true });
     await q(`document.querySelector('#syntax-dialog').close()`);
   });
 
@@ -1172,6 +1213,535 @@ try {
     await main.evaluate(`${win}.win.destroy(), true`);
   });
 
+  // ---- 1.1.0 の機能（変更箇所の目印・変更点の確認・ここを直す・リンク切れ・指定行へ移動・外部変更の差分・ショートカット一覧）----
+  const featPath = path.join(work, 'features.md');
+  const featText = [
+    '# 機能テスト', // 0
+    '', // 1
+    '最初の段落です。誤記があります。', // 2
+    '', // 3
+    '## 見出しA', // 4
+    '', // 5
+    '[無いファイル](nothing.md) [有るファイル](other2.md) [見出しへ](#見出しa) [無い見出し](#nothing) ![無い画像](none.png)', // 6
+    '', // 7
+    '二つ目の段落。誤記があります。', // 8
+    '', // 9
+    '末尾の行', // 10
+    '',
+  ].join('\n');
+  fs.writeFileSync(featPath, featText);
+  fs.writeFileSync(path.join(work, 'other2.md'), '# other2\n');
+  const fwin = `globalThis.__mvp.visibleContexts().find((x) => x.doc?.path === ${JSON.stringify(featPath)})`;
+  const fq = (expr) => main.evaluate(`${fwin}.win.webContents.executeJavaScript(${JSON.stringify(`(async () => (${expr}))()`)})`);
+  const fkey = (key, opts = '') => fq(`window.dispatchEvent(new KeyboardEvent('keydown', { key: '${key}', ${opts} })), true`);
+  const fset = (text) => fq(`(() => { const ta = document.querySelector('#ed-input'); ta.value = ${JSON.stringify(text)}; ta.dispatchEvent(new Event('input')); return true; })()`);
+
+  await step('変更箇所の目印: 変更・追加・削除した行に印が付き、元に戻すと消える', async () => {
+    await main.evaluate(`globalThis.__mvp.openFile(${JSON.stringify(featPath)}).then(() => true)`);
+    await waitFor(() => fq(`document.querySelector('#ed-input').value.startsWith('# 機能テスト')`), { label: '開く' });
+    await fkey('2', 'ctrlKey: true');
+    const lines = featText.split('\n');
+    const edited = [...lines];
+    edited[2] = '最初の段落です。誤字があります。'; // 変更
+    edited.splice(5, 0, '追加した行'); // 追加（見出しの後）
+    edited.splice(10, 1); // 「二つ目の段落」の後の空行を削除（元の 9 行目。追加で 1 つずれて 10）
+    await fset(edited.join('\n'));
+    const marks = await waitFor(
+      () =>
+        fq(`(() => {
+          const r = {};
+          document.querySelectorAll('#ed-mirror > .ed-line').forEach((n, i) => {
+            const m = [...n.classList].find((c) => c.startsWith('chg-'));
+            if (m) r[i] = m;
+          });
+          return Object.keys(r).length ? { r, dirty: document.querySelector('#st-dirty').textContent } : null;
+        })()`),
+      { label: '目印' },
+    );
+    assert.deepEqual(marks.r, { 2: 'chg-mod', 5: 'chg-add', 10: 'chg-del' });
+    assert.equal(marks.dirty, '● 未保存（変更 3 か所）');
+    // 保存済みの内容に戻すと、印も未保存の表示も消える
+    await fset(featText);
+    await waitFor(() => fq(`document.querySelectorAll('#ed-mirror [class*="chg-"]').length === 0 && document.querySelector('#st-dirty').hidden`), { label: '印が消える' });
+  });
+
+  await step('変更点の確認（Ctrl+D）: 差分と 1 行の中の変わった部分を表示し、そこから保存できる', async () => {
+    await fset(featText.replace('最初の段落です。誤記', '最初の段落です。誤字'));
+    await fkey('d', 'ctrlKey: true');
+    const view = await waitFor(
+      () =>
+        fq(`(() => {
+          const d = document.querySelector('#diff-dialog');
+          if (!d.open) return null;
+          return {
+            title: d.querySelector('h2').textContent,
+            del: [...d.querySelectorAll('.df-del .df-text')].map((t) => t.textContent),
+            add: [...d.querySelectorAll('.df-add .df-text')].map((t) => t.textContent),
+            marks: [...d.querySelectorAll('mark')].map((m) => m.textContent),
+            count: d.querySelector('.df-count').textContent,
+            buttons: [...d.querySelectorAll('.df-buttons button')].map((b) => b.textContent),
+          };
+        })()`),
+      { label: '変更点の確認' },
+    );
+    assert.deepEqual(view, {
+      title: '変更点の確認',
+      del: ['最初の段落です。誤記があります。'],
+      add: ['最初の段落です。誤字があります。'],
+      marks: ['記', '字'],
+      count: '1 か所',
+      buttons: ['保存', '閉じる'],
+    });
+    await fq(`document.querySelector('#diff-dialog .df-buttons .primary').click(), true`);
+    await waitFor(() => fs.readFileSync(featPath, 'utf8').includes('誤字'), { label: '保存' });
+    await waitFor(() => fq(`document.querySelector('#st-dirty').hidden && !document.querySelector('#diff-dialog').open`), { label: '保存後' });
+    // ステータスバーの「● 未保存」をクリックしても開く
+    await fset(featText);
+    await waitFor(() => fq(`!document.querySelector('#st-dirty').hidden`), { label: '未保存' });
+    await fq(`document.querySelector('#st-dirty').click(), true`);
+    await waitFor(() => fq(`document.querySelector('#diff-dialog').open`), { label: 'クリックで開く' });
+    await fq(`document.querySelector('#diff-dialog').close('close'), true`);
+  });
+
+  await step('2 段目の右端: 右端の「変更点」ボタンで変更点の確認が開き、右から 2 番目で変更した行の印をオン / オフできる（全ウィンドウ共通で保存）', async () => {
+    await fkey('2', 'ctrlKey: true');
+    const order = await fq(`[...document.querySelectorAll('#tools .tools-right > button')].map((b) => b.id)`);
+    assert.deepEqual(order, ['btn-marks', 'btn-changes'], '右端が変更点、その左が印の切り替え');
+    // 右端（変更点）は 1 段目の右端（モード切替）とそろう。印の切り替えは 28px 角、間隔は 6px
+    const align = await fq(`(() => {
+      const r = (s) => document.querySelector(s).getBoundingClientRect();
+      const marks = r('#btn-marks'), changes = r('#btn-changes'), modes = r('.mode-switch');
+      return { size: [marks.width, marks.height], rightAligned: changes.right === modes.right, gap: changes.left - marks.right, height: changes.height };
+    })()`);
+    assert.deepEqual(align, { size: [28, 28], rightAligned: true, gap: 6, height: 28 });
+    // 「変更点」は枠のあるボタン
+    assert.notEqual(await fq(`getComputedStyle(document.querySelector('#btn-changes')).borderTopColor`), 'rgba(0, 0, 0, 0)');
+    await fset(featText.replace('末尾の行', '末尾の行（変更）'));
+    const marked = () => fq(`document.querySelectorAll('#ed-mirror [class*="chg-"]').length`);
+    await waitFor(async () => (await marked()) > 0, { label: '印' });
+    // オフ: 印が消え、変更の数は出したまま。設定に保存される
+    await fq(`document.querySelector('#btn-marks').click(), true`);
+    await waitFor(async () => (await marked()) === 0 && (await fq(`document.querySelector('#btn-marks').getAttribute('aria-pressed')`)) === 'false', { label: 'オフ' });
+    assert.match(await fq(`document.querySelector('#st-dirty').textContent`), /変更 \d+ か所/, '変更の数は出したまま');
+    await waitFor(() => JSON.parse(fs.readFileSync(path.join(work, 'userData', 'settings.json'), 'utf8')).changeMarks === false, { label: '保存' });
+    // 入力しても印は出ない
+    await fset(featText.replace('末尾の行', '末尾の行（変更 2）'));
+    await sleep(300);
+    assert.equal(await marked(), 0);
+    // オン: 印が戻る
+    await fq(`document.querySelector('#btn-marks').click(), true`);
+    await waitFor(async () => (await marked()) > 0, { label: 'オン' });
+    // 変更点ボタン
+    await fq(`document.querySelector('#btn-changes').click(), true`);
+    await waitFor(() => fq(`document.querySelector('#diff-dialog').open && document.querySelector('#diff-dialog h2').textContent === '変更点の確認'`), { label: '変更点の確認' });
+    await fq(`document.querySelector('#diff-dialog').close('close'), true`);
+    // 狭いウィンドウでも右側の 2 つは見切れない（左側の記法ボタンが後ろから隠れる）
+    await main.evaluate(`${fwin}.win.setSize(480, 600), true`);
+    await sleep(300);
+    const fit = await fq(`(() => {
+      const row = document.querySelector('#tools').getBoundingClientRect();
+      return [...document.querySelectorAll('#tools .tools-right > button')].every((b) => { const r = b.getBoundingClientRect(); return r.width > 0 && r.left >= row.left && r.right <= row.right + 0.5; });
+    })()`);
+    assert.equal(fit, true, '右側のボタンが見える');
+    await main.evaluate(`${fwin}.win.setSize(1100, 820), true`);
+    await fset(featText);
+  });
+
+  await step('設定「保存の前に変更点を確認する」: キャンセルでは保存せず、「保存する」で保存する', async () => {
+    await fq(`window.mvp.setSetting('confirmDiffOnSave', true), true`);
+    await sleep(200);
+    await fkey(',', 'ctrlKey: true');
+    assert.equal(await fq(`document.querySelector('#setting-confirm-diff').checked`), true, '設定画面に反映');
+    await fq(`document.querySelector('#settings-dialog').close(), true`);
+    const before = fs.readFileSync(featPath, 'utf8');
+    await fkey('s', 'ctrlKey: true');
+    await waitFor(() => fq(`document.querySelector('#diff-dialog').open && document.querySelector('#diff-dialog h2').textContent === '保存の前に変更点を確認'`), { label: '確認' });
+    await fq(`[...document.querySelectorAll('#diff-dialog .df-buttons button')].find((b) => b.textContent === 'キャンセル').click(), true`);
+    await sleep(300);
+    assert.equal(fs.readFileSync(featPath, 'utf8'), before, 'キャンセルでは保存しない');
+    await fkey('s', 'ctrlKey: true');
+    await waitFor(() => fq(`document.querySelector('#diff-dialog').open`), { label: '確認' });
+    await fq(`document.querySelector('#diff-dialog .df-buttons .primary').click(), true`);
+    await waitFor(() => fs.readFileSync(featPath, 'utf8') === featText, { label: '保存' });
+    await fq(`window.mvp.setSetting('confirmDiffOnSave', false), true`);
+  });
+
+  await step('表示の文字をダブルクリック: 2 ペインに切り替わり、編集側で同じ文字（同じ段落の）が選択される', async () => {
+    await fkey('1', 'ctrlKey: true');
+    await sleep(200);
+    const r = await fq(`(() => {
+      const root = document.querySelector('#preview').shadowRoot;
+      const p = [...root.querySelectorAll('p')].find((x) => x.textContent.startsWith('二つ目'));
+      const tn = [...p.childNodes].find((n) => n.nodeType === 3);
+      const i = tn.data.indexOf('誤記');
+      document.getSelection().setBaseAndExtent(tn, i, tn, i + 2);
+      p.dispatchEvent(new MouseEvent('dblclick', { bubbles: true, composed: true }));
+      const ta = document.querySelector('#ed-input');
+      return { mode: document.body.dataset.mode, selected: ta.value.slice(ta.selectionStart, ta.selectionEnd), start: ta.selectionStart, focus: document.activeElement === ta };
+    })()`);
+    const expectedStart = featText.indexOf('二つ目の段落。誤記') + '二つ目の段落。'.length;
+    assert.deepEqual(r, { mode: 'split', selected: '誤記', start: expectedStart, focus: true });
+  });
+
+  await step('リンク切れ: 無いファイル・無い見出し・無い画像に印が付き、ステータスバーから順に移動できる', async () => {
+    await fkey('1', 'ctrlKey: true');
+    const st = await waitFor(() => fq(`!document.querySelector('#st-links').hidden && document.querySelector('#st-links').textContent`), { label: 'リンク切れ' });
+    assert.equal(st, 'リンク切れ 3');
+    const broken = await fq(`[...document.querySelector('#preview').shadowRoot.querySelectorAll('.mvp-broken')].map((e) => e.getAttribute('href') ?? e.getAttribute('alt'))`);
+    assert.deepEqual(broken, ['nothing.md', '#nothing', '無い画像']);
+    await fq(`document.querySelector('#st-links').click(), true`);
+    assert.equal(await fq(`window.__mvpState.brokenIndex`), 0);
+    // 編集モードでは出さない
+    await fkey('2', 'ctrlKey: true');
+    assert.equal(await fq(`document.querySelector('#st-links').hidden`), true);
+    // 無かったファイルを作ってウィンドウに戻ると、調べ直して減る
+    fs.writeFileSync(path.join(work, 'nothing.md'), '# 作った\n');
+    await fkey('1', 'ctrlKey: true');
+    await sleep(2200);
+    await fq(`window.dispatchEvent(new Event('focus')), true`);
+    await waitFor(() => fq(`document.querySelector('#st-links').textContent === 'リンク切れ 2'`), { label: '調べ直し' });
+  });
+
+  await step('指定行へ移動（Ctrl+G）: 編集側はその行へキャレット、表示モードはその行を表示して強調、範囲外は最後の行', async () => {
+    await fkey('2', 'ctrlKey: true');
+    await fkey('g', 'ctrlKey: true');
+    await waitFor(() => fq(`document.querySelector('#goto-dialog').open`), { label: 'ダイアログ' });
+    await fq(`(() => { document.querySelector('#goto-input').value = '9'; document.querySelector('#goto-dialog button[value=go]').click(); return true; })()`);
+    // 移動はダイアログが閉じたとき（close イベント）に行う
+    const pos9 = featText.split('\n').slice(0, 8).join('\n').length + 1;
+    await waitFor(() => fq(`document.querySelector('#ed-input').selectionStart === ${pos9} && !document.querySelector('#goto-dialog').open`), { label: '9 行目へ' });
+    // 数字でない入力では閉じない（ブラウザの検査のエラーも出さない）。全角数字は読める
+    await fq(`document.querySelector('#st-pos').click(), true`);
+    await fq(`(() => { document.querySelector('#goto-input').value = 'abc'; document.querySelector('#goto-dialog button[value=go]').click(); return true; })()`);
+    await sleep(100);
+    assert.equal(await fq(`document.querySelector('#goto-dialog').open`), true, '数字でなければ閉じない');
+    await fq(`(() => { document.querySelector('#goto-input').value = '３'; document.querySelector('#goto-dialog button[value=go]').click(); return true; })()`);
+    await waitFor(() => fq(`window.__mvpEditor.caretPosition().line === 3`), { label: '全角数字' });
+    // 範囲外は最後の行
+    await fq(`document.querySelector('#st-pos').click(), true`);
+    await fq(`(() => { document.querySelector('#goto-input').value = '99999'; document.querySelector('#goto-dialog button[value=go]').click(); return true; })()`);
+    await waitFor(() => fq(`window.__mvpEditor.caretPosition().line === ${featText.split('\n').length}`), { label: '最後の行へ' });
+    // 表示モード: その行を含むブロックを強調
+    await fkey('1', 'ctrlKey: true');
+    await fkey('g', 'ctrlKey: true');
+    await fq(`(() => { document.querySelector('#goto-input').value = '9'; document.querySelector('#goto-dialog button[value=go]').click(); return true; })()`);
+    const flashed = await waitFor(() => fq(`(() => { const f = [...document.querySelector('#preview').shadowRoot.querySelectorAll('.mvp-flash')].map((e) => e.textContent.slice(0, 6)); return f.length ? f : null; })()`), { label: '強調' });
+    assert.deepEqual(flashed, ['二つ目の段落']);
+  });
+
+  await step('外部変更の差分: 編集中に外部で変更されると「差分を見る」から外部の変更と自分の編集を並べて見られる', async () => {
+    await fkey('2', 'ctrlKey: true');
+    await fset(featText.replace('末尾の行', '末尾の行（自分の編集）'));
+    await waitFor(() => main.evaluate(`${fwin}.dirty === true`), { label: '未保存' });
+    fs.writeFileSync(featPath, featText.replace('# 機能テスト', '# 機能テスト（外部で変更）'));
+    await waitFor(() => fq(`!document.querySelector('#banner').hidden && !document.querySelector('#banner-diff').hidden`), { label: '差分を見るボタン', timeout: 8000 });
+    await fq(`document.querySelector('#banner-diff').click(), true`);
+    const d = await waitFor(
+      () =>
+        fq(`(() => {
+          const d = document.querySelector('#diff-dialog');
+          if (!d.open) return null;
+          return {
+            title: d.querySelector('h2').textContent,
+            sections: [...d.querySelectorAll('.df-section h3')].map((h) => h.firstChild.textContent),
+            adds: [...d.querySelectorAll('.df-add .df-text')].map((t) => t.textContent),
+            buttons: [...d.querySelectorAll('.df-buttons button')].map((b) => b.textContent),
+          };
+        })()`),
+      { label: '差分の画面' },
+    );
+    assert.deepEqual(d, {
+      title: '外部での変更',
+      sections: ['外部の変更（読み込んだ内容 → 今のファイル）', 'あなたの編集（読み込んだ内容 → 編集中の内容）'],
+      adds: ['# 機能テスト（外部で変更）', '末尾の行（自分の編集）'],
+      buttons: ['外部の変更を読み込む（編集を破棄）', '閉じる'],
+    });
+    // 閉じると編集はそのまま
+    await fq(`document.querySelector('#diff-dialog .df-buttons .primary').click(), true`);
+    await sleep(200);
+    assert.equal(await fq(`document.querySelector('#ed-input').value.includes('自分の編集')`), true);
+    assert.equal(await main.evaluate(`${fwin}.dirty`), true);
+  });
+
+  await step('外部変更の通知の「×」: 意味をツールチップで示し、閉じてもステータスバーの印から出し直せる。読み直すと消える', async () => {
+    // 直前の手順で、編集中に外部で変更された通知が出ている
+    await waitFor(() => fq(`!document.querySelector('#banner').hidden`), { label: '通知' });
+    assert.equal(await fq(`document.querySelector('#banner-close').title`), '閉じる（外部の変更は取り込まずに編集を続けます）');
+    // ×: 通知は消え、ステータスバーに印が残る。編集はそのまま
+    await fq(`document.querySelector('#banner-close').click(), true`);
+    assert.deepEqual(await fq(`({ banner: document.querySelector('#banner').hidden, mark: !document.querySelector('#st-external').hidden && document.querySelector('#st-external').textContent, text: document.querySelector('#ed-input').value.includes('自分の編集') })`), {
+      banner: true,
+      mark: '外部で変更あり',
+      text: true,
+    });
+    // 印をクリックすると通知（差分を見る・再読み込み）が戻り、印は隠れる
+    await fq(`document.querySelector('#st-external').click(), true`);
+    assert.deepEqual(await fq(`({ banner: !document.querySelector('#banner').hidden, diff: !document.querySelector('#banner-diff').hidden, reload: !document.querySelector('#banner-reload').hidden, mark: document.querySelector('#st-external').hidden })`), {
+      banner: true,
+      diff: true,
+      reload: true,
+      mark: true,
+    });
+    // もう一度閉じてから、再読み込みで外部の変更を取り込むと、印も消える
+    await fq(`document.querySelector('#banner-close').click(), true`);
+    await fq(`document.querySelector('#st-external').click(), true`);
+    await fq(`document.querySelector('#banner-reload').click(), true`);
+    await waitFor(() => fq(`document.querySelector('#ed-input').value.startsWith('# 機能テスト（外部で変更）') && document.querySelector('#banner').hidden && document.querySelector('#st-external').hidden`), { label: '読み直しで解決' });
+  });
+
+  await step('表のボタン: カーソル行の次に 2 列の表のひな形を入れて見出しを選択し、前後の文字の行とは空行で区切る。元に戻せる', async () => {
+    await fkey('3', 'ctrlKey: true');
+    const tableBtn = await fq(`(() => { const btns = [...document.querySelectorAll('#tools .tools-left button')].map((b) => b.dataset.tool ?? b.dataset.action); return btns.slice(btns.indexOf('codeblock'), btns.indexOf('hr') + 1); })()`);
+    assert.deepEqual(tableBtn, ['codeblock', 'table', 'hr'], 'コードブロックと水平線の間');
+    const base = await fq(`document.querySelector('#ed-input').value`);
+    const run = (text, caret) =>
+      fq(`(() => {
+        const ta = document.querySelector('#ed-input');
+        ta.value = ${JSON.stringify(text)};
+        ta.dispatchEvent(new Event('input'));
+        ta.focus();
+        ta.setSelectionRange(${caret}, ${caret});
+        document.querySelector('#tools [data-tool="table"]').click();
+        return { value: ta.value, selected: ta.value.slice(ta.selectionStart, ta.selectionEnd) };
+      })()`);
+    const T = '| 見出し | 見出し |\n| --- | --- |\n|  |  |';
+    // 段落の途中の行（前後に文字）→ 前後に空行
+    let r = await run('前の行\n後の行', 2);
+    assert.deepEqual(r, { value: `前の行\n\n${T}\n\n後の行`, selected: '見出し' });
+    // 段落の直後の空行 → 空行を区切りに残して次の行へ
+    r = await run('前の行\n\n後の行', 4);
+    assert.deepEqual(r, { value: `前の行\n\n${T}\n\n後の行`, selected: '見出し' });
+    // 前後が空行の空の行 → その行に入れる（空行を足さない）
+    r = await run('前の行\n\n\n\n後の行', 5);
+    assert.deepEqual(r, { value: `前の行\n\n${T}\n\n後の行`, selected: '見出し' });
+    // 空の文書
+    r = await run('', 0);
+    assert.deepEqual(r, { value: T, selected: '見出し' });
+    // 文書の末尾
+    r = await run('最後の行', 4);
+    assert.deepEqual(r, { value: `最後の行\n\n${T}`, selected: '見出し' });
+    // プレビューで表として表示される
+    await waitFor(() => fq(`!!document.querySelector('#preview').shadowRoot.querySelector('table th')`), { label: '表の表示' });
+    // 元に戻す（表の挿入が 1 回の操作で戻る）
+    await fq(`(() => { document.querySelector('#ed-input').focus(); document.execCommand('undo'); return true; })()`);
+    assert.equal(await fq(`document.querySelector('#ed-input').value`), '最後の行');
+    await fset(base);
+  });
+
+  await step('目次: ボタン / Ctrl+Shift+O で開閉し、見出しの一覧・クリックで移動・読んでいる見出しの強調・入力で更新', async () => {
+    await fkey('1', 'ctrlKey: true');
+    assert.equal(await fq(`document.querySelector('#toc').hidden`), true, '既定は閉じている');
+    await fq(`document.querySelector('#btn-toc').click(), true`);
+    const view = await fq(`(() => ({
+      open: !document.querySelector('#toc').hidden,
+      pressed: document.querySelector('#btn-toc').getAttribute('aria-pressed'),
+      items: [...document.querySelectorAll('#toc-list .toc-item')].map((b) => [b.textContent, b.style.getPropertyValue('--toc-indent')]),
+      saved: localStorage.getItem('mvp.toc'),
+      width: document.querySelector('#toc').getBoundingClientRect().width,
+      workspaceLeft: document.querySelector('#workspace').getBoundingClientRect().left,
+    }))()`);
+    const lines = (await fq(`document.querySelector('#ed-input').value`)).split('\n');
+    const expected = lines.map((l) => /^(#{1,6}) (.*)$/.exec(l)).filter(Boolean).map((m) => [m[2], String(m[1].length - 1)]);
+    assert.deepEqual(
+      { open: view.open, pressed: view.pressed, items: view.items, saved: view.saved, besideWorkspace: Math.abs(view.width - view.workspaceLeft) <= 1 },
+      { open: true, pressed: 'true', items: expected, saved: '1', besideWorkspace: true },
+    );
+    // 編集モードで見出しをクリック → その行へキャレット、強調も移る
+    await fkey('2', 'ctrlKey: true');
+    const target = lines.findIndex((l) => l === '## 見出しA');
+    await fq(`[...document.querySelectorAll('#toc-list .toc-item')].find((b) => b.textContent === '見出しA').click(), true`);
+    assert.equal(await fq(`window.__mvpEditor.caretPosition().line`), target + 1);
+    assert.equal(await fq(`document.querySelector('#toc-list .toc-item.current')?.textContent`), '見出しA');
+    // 見出しを書き足すと、少し後に一覧に出る
+    await fset(`${lines.join('\n')}\n\n## 追加した見出し\n`);
+    await waitFor(() => fq(`[...document.querySelectorAll('#toc-list .toc-item')].some((b) => b.textContent === '追加した見出し')`), { label: '一覧の更新' });
+    // Ctrl+Shift+O で閉じる（状態は覚える）
+    await fkey('O', 'ctrlKey: true, shiftKey: true');
+    assert.deepEqual(await fq(`[document.querySelector('#toc').hidden, localStorage.getItem('mvp.toc')]`), [true, '0']);
+    await fset(lines.join('\n'));
+  });
+
+  await step('改行で折り返す・拡大縮小を繰り返しても、表示位置が少しずつずれていかない', async () => {
+    const f = path.join(work, 'drift.md');
+    const paras = Array.from({ length: 300 }, (_, i) => `## 節 ${i}\n\n段落 ${i} の一行目です。\n二行目はもう少し長い文章で、改行で折り返すと行が分かれます。\n三行目。\n`);
+    fs.writeFileSync(f, paras.join('\n'));
+    await main.evaluate(`globalThis.__mvp.openFile(${JSON.stringify(f)}).then(() => true)`);
+    const w = `globalThis.__mvp.visibleContexts().find((x) => x.doc?.path === ${JSON.stringify(f)})`;
+    const dq = (expr) => main.evaluate(`${w}.win.webContents.executeJavaScript(${JSON.stringify(`(async () => (${expr}))()`)})`);
+    await waitFor(() => dq(`document.querySelector('#preview').shadowRoot.querySelectorAll('h2').length === 300`), { label: '表示' });
+    const run = (mode, button) =>
+      dq(`(async () => {
+        const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+        document.querySelector('[data-mode=${mode}]').click();
+        await wait(100);
+        const el = ${mode === 'view' ? "document.querySelector('#preview')" : "document.querySelector('#ed-input')"};
+        el.scrollTop = el.scrollHeight * 0.45;
+        el.dispatchEvent(new Event('scroll'));
+        await wait(100);
+        const tops = [];
+        for (let i = 0; i < 12; i++) {
+          tops.push(el.scrollTop);
+          document.querySelector(${button === 'zoom' ? "i % 2 ? '#btn-zoom-out' : '#btn-zoom-in'" : "'#btn-breaks'"}).click();
+          await wait(80);
+        }
+        tops.push(el.scrollTop);
+        return tops;
+      })()`);
+    for (const [mode, button] of [['view', 'breaks'], ['view', 'zoom'], ['edit', 'zoom']]) {
+      const tops = await run(mode, button);
+      // 同じ状態（偶数回押した後）の位置は毎回同じ
+      const even = tops.filter((_, i) => i % 2 === 0);
+      assert.ok(even.every((t) => t === even[0]), `${mode} / ${button}: ${tops.join(',')}`);
+    }
+    await dq(`document.documentElement.style.getPropertyValue('--zoom')`);
+    await main.evaluate(`${w}.win.destroy(), true`);
+  });
+
+  await step('表示 > フォントと行間: プレビューの本文のフォント・行間を見本を見ながら選ぶと、すぐに反映して保存する（設定画面には無い）', async () => {
+    await fkey('1', 'ctrlKey: true');
+    // 表示メニューにあり、設定画面には無い
+    const viewMenu = await main.evaluate(`${fwin}.menu.items.find((m) => __plain(m.label) === '表示(&V)').submenu.items.map((i) => __plain(i.label))`);
+    assert.deepEqual(viewMenu, ['テーマ(&T)...', 'フォントと行間(&F)...']);
+    await fkey(',', 'ctrlKey: true');
+    assert.equal(await fq(`document.querySelector('#settings-dialog #setting-preview-font')`), null, '設定画面には無い');
+    await fq(`document.querySelector('#settings-dialog').close(), true`);
+    await main.evaluate(`${fwin}.menu.items.find((m) => __plain(m.label) === '表示(&V)').submenu.items.find((i) => __plain(i.label) === 'フォントと行間(&F)...').click(), true`);
+    await waitFor(() => fq(`document.querySelector('#font-dialog').open && !!document.querySelector('#font-dialog #setting-preview-font')`), { label: 'フォントと行間の画面' });
+    const style = () =>
+      fq(`(() => {
+        const a = getComputedStyle(document.querySelector('#preview').shadowRoot.querySelector('article'));
+        const sample = document.querySelector('.sd-sample');
+        return { font: a.fontFamily, line: a.lineHeight, sampleFont: sample.style.fontFamily, sampleLine: sample.style.lineHeight };
+      })()`);
+    assert.deepEqual(await fq(`[document.querySelector('#setting-preview-font').value, document.querySelector('#setting-preview-line-height').value]`), ['standard', 'standard']);
+    let st = await style();
+    assert.match(st.font, /Segoe UI/);
+    assert.equal(st.line, '25.5px', '15px × 1.7');
+    // 明朝・とても広い
+    await fq(`(() => {
+      for (const [id, v] of [['#setting-preview-font', 'mincho'], ['#setting-preview-line-height', 'loose']]) {
+        const s = document.querySelector(id); s.value = v; s.dispatchEvent(new Event('change'));
+      }
+      return true;
+    })()`);
+    await waitFor(async () => (await style()).line === '33px', { label: '反映' });
+    st = await style();
+    assert.match(st.font, /Mincho/);
+    assert.match(st.sampleFont, /Mincho/);
+    assert.equal(st.sampleLine, '2.2');
+    await waitFor(() => {
+      const saved = JSON.parse(fs.readFileSync(path.join(work, 'userData', 'settings.json'), 'utf8'));
+      return saved.previewFont === 'mincho' && saved.previewLineHeight === 'loose';
+    }, { label: '保存' });
+    // 元に戻す
+    await fq(`(() => {
+      for (const [id, v] of [['#setting-preview-font', 'standard'], ['#setting-preview-line-height', 'standard']]) {
+        const s = document.querySelector(id); s.value = v; s.dispatchEvent(new Event('change'));
+      }
+      document.querySelector('#font-dialog').close();
+      return true;
+    })()`);
+    await waitFor(async () => (await style()).line === '25.5px', { label: '元に戻す' });
+  });
+
+  await step('GitHub のアラート・脚注: 表示され、脚注の番号をクリックすると脚注へ、↩ で本文へ移動し、リンク切れにはならない', async () => {
+    const base = await fq(`document.querySelector('#ed-input').value`);
+    const filler = Array.from({ length: 60 }, (_, i) => `段落 ${i}`).join('\n\n');
+    await fset(`# 題\n\n> [!WARNING]\n> 注意の本文\n\n本文に脚注[^1]。\n\n${filler}\n\n[^1]: 脚注の文章\n`);
+    await fkey('1', 'ctrlKey: true');
+    await waitFor(() => fq(`!!document.querySelector('#preview').shadowRoot.querySelector('.footnotes #mvp-fn-1')`), { label: '表示' });
+    const r = await fq(`(() => {
+      const root = document.querySelector('#preview').shadowRoot;
+      const alert = root.querySelector('.markdown-alert-warning');
+      return { title: alert?.querySelector('.markdown-alert-title').textContent, color: getComputedStyle(alert).borderLeftStyle, ref: root.querySelector('sup.footnote-ref a')?.textContent };
+    })()`);
+    assert.deepEqual(r, { title: '警告', color: 'solid', ref: '1' });
+    // 番号 → 脚注（下へスクロール）、↩ → 本文（上へ戻る）
+    await fq(`(() => { const pv = document.querySelector('#preview'); pv.scrollTop = 0; pv.shadowRoot.querySelector('sup.footnote-ref a').click(); return true; })()`);
+    const down = await fq(`document.querySelector('#preview').scrollTop`);
+    assert.ok(down > 300, `脚注へ移動: ${down}`);
+    await fq(`document.querySelector('#preview').shadowRoot.querySelector('.footnote-backref').click(), true`);
+    assert.ok((await fq(`document.querySelector('#preview').scrollTop`)) < down, '本文へ戻る');
+    // #mvp-fn-1 / #mvp-fnref-1 は文書の中にあるのでリンク切れにしない
+    await sleep(600);
+    assert.equal(await fq(`document.querySelector('#preview').shadowRoot.querySelectorAll('.footnotes .mvp-broken, .footnote-ref .mvp-broken').length`), 0);
+    await fset(base);
+  });
+
+  await step('保存しておいた 2 ペインの比率が壊れていても、新しく開いたウィンドウの 2 ペインは崩れない', async () => {
+    const f = path.join(work, 'split-broken.md');
+    fs.writeFileSync(f, '# 比率\n\n本文\n');
+    await fq(`localStorage.setItem('mvp.split', 'abc'), true`);
+    // 予備ウィンドウは値を入れる前に読み込み済みなので捨て、新しいウィンドウで開く
+    await main.evaluate(`(() => { globalThis.__mvp.spare?.win.destroy(); return true; })()`);
+    await main.evaluate(`globalThis.__mvp.openFile(${JSON.stringify(f)}).then(() => true)`);
+    const w = `globalThis.__mvp.visibleContexts().find((x) => x.doc?.path === ${JSON.stringify(f)})`;
+    const s = await main.evaluate(`${w}.win.webContents.executeJavaScript(${JSON.stringify(`(async () => {
+      document.querySelector('[data-mode=split]').click();
+      await new Promise((r) => setTimeout(r, 300));
+      const w = (sel) => Math.round(document.querySelector(sel).getBoundingClientRect().width);
+      return { ed: w('#editor-pane'), pv: w('#preview-pane'), ws: w('#workspace') };
+    })()`)})`);
+    assert.ok(s.ed >= 200 && s.pv >= 150 && s.ed + s.pv <= s.ws + 1, JSON.stringify(s));
+    await fq(`localStorage.setItem('mvp.split', '50%'), true`);
+    await main.evaluate(`${w}.win.destroy(), true`);
+  });
+
+  await step('終了をキャンセルすると、どのウィンドウも閉じない（未保存でないウィンドウも残る）', async () => {
+    const clean = path.join(work, 'quit-clean.md');
+    const dirty = path.join(work, 'quit-dirty.md');
+    fs.writeFileSync(clean, '# そのまま\n');
+    fs.writeFileSync(dirty, '# 直す\n');
+    for (const f of [clean, dirty]) await main.evaluate(`globalThis.__mvp.openFile(${JSON.stringify(f)}).then(() => true)`);
+    const dw = `globalThis.__mvp.visibleContexts().find((x) => x.doc?.path === ${JSON.stringify(dirty)})`;
+    await main.evaluate(`${dw}.win.webContents.executeJavaScript("(() => { const ta = document.querySelector('#ed-input'); ta.value += 'x'; ta.dispatchEvent(new Event('input')); return true; })()")`);
+    await waitFor(() => main.evaluate(`${dw}.dirty === true`), { label: '未保存' });
+    const before = await main.evaluate('globalThis.__mvp.visibleContexts().length');
+    await main.evaluate(`(() => {
+      globalThis.__quitAsked = 0;
+      globalThis.__origBox2 = globalThis.__mvp.dialog.showMessageBox;
+      globalThis.__mvp.dialog.showMessageBox = async (w, o) => { if (/変更を保存しますか/.test(o?.message)) { globalThis.__quitAsked++; return { response: 2 }; } return globalThis.__origBox2(w, o); };
+      globalThis.__mvp.app.quit();
+      return true;
+    })()`);
+    await waitFor(() => main.evaluate('globalThis.__quitAsked >= 1'), { label: '確認' });
+    await sleep(500);
+    assert.equal(await main.evaluate('globalThis.__mvp.visibleContexts().length'), before, 'ウィンドウは 1 つも閉じない');
+    assert.ok(await main.evaluate(`globalThis.__mvp.visibleContexts().some((x) => x.doc?.path === ${JSON.stringify(clean)})`), '未保存でないウィンドウも残る');
+    await main.evaluate(`globalThis.__mvp.dialog.showMessageBox = globalThis.__origBox2, true`);
+    await main.evaluate(`(() => { for (const c of globalThis.__mvp.visibleContexts()) if (c.doc && [${JSON.stringify(clean)}, ${JSON.stringify(dirty)}].includes(c.doc.path)) c.win.destroy(); return true; })()`);
+  });
+
+  await step('キーボード ショートカットの一覧（F1・ヘルプ メニュー）と、新しいメニュー項目', async () => {
+    await fkey('F1');
+    const list = await waitFor(() => fq(`document.querySelector('#shortcuts-dialog').open && [...document.querySelectorAll('#shortcuts-dialog kbd')].map((k) => k.textContent)`), { label: '一覧' });
+    for (const k of ['Ctrl+S', 'Ctrl+G', 'Ctrl+D', 'F1', 'Ctrl+F', 'Alt+F', 'Alt+E', 'Alt+V', 'Alt+H']) assert.ok(list.includes(k), `一覧に ${k}`);
+    // 一覧の「メニューを開く」のキーは、メニューの見出しのアクセスキー（& の文字）と一致する
+    const access = await main.evaluate(`${fwin}.menu.items.map((m) => 'Alt+' + /&(.)/.exec(m.label)[1].toUpperCase())`);
+    assert.deepEqual(access, ['Alt+F', 'Alt+E', 'Alt+V', 'Alt+H']);
+    // アクセスキーが表示から消されない形（括弧の直後にゼロ幅スペース）になっている。& の後の文字は元のまま
+    const shown = await main.evaluate(`${fwin}.menu.items.map((m) => m.label)`);
+    assert.deepEqual(shown, ['ファイル(\u200B&F)', '編集(\u200B&E)', '表示(\u200B&V)', 'ヘルプ(\u200B&H)']);
+    // 表示崩れが無い: どの行も「動作」の欄に十分な幅があり、表が枠からはみ出さない
+    const layout = await fq(`(() => {
+      const body = document.querySelector('#shortcuts-dialog .sc-body').getBoundingClientRect();
+      const actions = [...document.querySelectorAll('#shortcuts-dialog .sc-action')].map((a) => a.getBoundingClientRect().width);
+      const tables = [...document.querySelectorAll('#shortcuts-dialog .sc-table')].map((t) => t.getBoundingClientRect());
+      return { minAction: Math.min(...actions), inside: tables.every((t) => t.right <= body.right + 0.5) };
+    })()`);
+    assert.ok(layout.minAction >= 120 && layout.inside, JSON.stringify(layout));
+    await fq(`document.querySelector('#shortcuts-dialog').close(), true`);
+    const menus = await main.evaluate(`(() => {
+      const m = ${fwin}.menu.items;
+      const labels = (name) => m.find((i) => __plain(i.label) === name).submenu.items.map((i) => __plain(i.label)).filter(Boolean);
+      return { edit: labels('編集(&E)'), help: labels('ヘルプ(&H)') };
+    })()`);
+    assert.ok(menus.edit.includes('指定行へ移動(&G)...') && menus.edit.includes('変更点を確認(&D)...'), menus.edit.join(','));
+    assert.equal(menus.help[0], 'キーボード ショートカット(&K)');
+    // 後片付け（未保存のまま閉じる）
+    await main.evaluate(`${fwin}.win.destroy(), true`);
+  });
+
   await step('予備ウィンドウが先読みされている', async () => {
     await waitFor(() => main.evaluate('Boolean(globalThis.__mvp.spare)'), { label: '予備ウィンドウ', timeout: 5000 });
   });
@@ -1191,6 +1761,8 @@ try {
     const code = await Promise.race([exited, sleep(10000).then(() => 'timeout')]);
     assert.notEqual(code, 'timeout', 'アプリが終了しない');
     assert.match(log, /\[E2E-DIALOG\] .*変更を保存しますか/);
+    // 途中で予期しないエラー（main の例外）が起きていない
+    assert.doesNotMatch(log, /\[E2E-ERRORBOX\]/, '予期しないエラーのダイアログが出た');
     const saved = Encoding.convert(fs.readFileSync(samplePath), { to: 'UNICODE', from: 'SJIS', type: 'string' });
     assert.equal(saved.startsWith('X'), false, '保存されていない');
     // 起動・終了の記録（原因を後から調べるためのログ）が残っている

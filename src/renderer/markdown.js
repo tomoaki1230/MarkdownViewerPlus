@@ -2,8 +2,10 @@
 // ・表示モードと編集中のプレビューは必ずこの経路を通す（サニタイズ漏れを作らない）
 // ・トップレベルのブロック先頭タグに data-line（0 始まりのソース行）を付け、左右スクロール同期に使う
 // ・巨大な段落（空行を挟まない大量の行・非常に長い行）は、見た目を保ったまま内部で小分けにする（splitParagraph）
+// ・GitHub のアラート（> [!NOTE] など）と脚注（[^1]）に対応する（gfm-extras.js）
 import { Marked } from 'marked';
 import { emojiExtension, emojiMap } from './emoji.js';
+import { alertExtension, createFootnoteState, FOOTNOTE_ID_PREFIX, footnoteExtension, footnotesHtml } from './gfm-extras.js';
 
 // GitHub 互換の見出し ID（同名はサフィックス -1, -2 … で区別）
 function createSlugger() {
@@ -121,8 +123,15 @@ export function createMarkdownRenderer({ DOMPurify, map = emojiMap }) {
   let topToken = null;
   let topLine = 0;
 
+  // 脚注の状態（変換のたびに作り直す）
+  let footnotes = createFootnoteState();
+  // アプリが作った脚注の要素の印（起動ごとの乱数。文書からは分からないので、文書中の HTML が脚注の id を名乗れない）
+  const ownToken = Array.from(crypto.getRandomValues(new Uint8Array(16)), (b) => b.toString(16).padStart(2, '0')).join('');
+  const own = ` data-mvp-own="${ownToken}"`;
+
   const marked = new Marked({ gfm: true, breaks: false });
   marked.use(emojiExtension(map));
+  marked.use(alertExtension(), footnoteExtension(() => footnotes, own));
   marked.use({
     renderer: {
       heading(token) {
@@ -141,6 +150,14 @@ export function createMarkdownRenderer({ DOMPurify, map = emojiMap }) {
       },
     },
   });
+
+  // 脚注の id（mvp-fn…）は、印の付いた（アプリが作った）要素にだけ残す。印は表示には残さない
+  DOMPurify.addHook('uponSanitizeAttribute', (node, data) => {
+    if (data.attrName === 'id' && data.attrValue.startsWith(FOOTNOTE_ID_PREFIX) && node.getAttribute?.('data-mvp-own') !== ownToken) {
+      data.keepAttr = false;
+    }
+  });
+  DOMPurify.addHook('afterSanitizeAttributes', (node) => node.removeAttribute?.('data-mvp-own'));
 
   // 相対パスの画像はファイルのあるフォルダ基準で解決する（プレビューは Shadow DOM のため <base> が効かない）
   DOMPurify.addHook('afterSanitizeAttributes', (node) => {
@@ -162,6 +179,7 @@ export function createMarkdownRenderer({ DOMPurify, map = emojiMap }) {
    */
   function toHtml(src) {
     slug = createSlugger();
+    footnotes = createFootnoteState();
     const tokens = marked.lexer(src);
     let html = '';
     let pos = 0;
@@ -187,6 +205,12 @@ export function createMarkdownRenderer({ DOMPurify, map = emojiMap }) {
         pos += token.raw.length;
       }
     }
+    // 参照された脚注を文書の最後にまとめて出す（参照リンクの定義は本文と共通）
+    html += footnotesHtml(footnotes, (list) => {
+      const t = [...list];
+      t.links = tokens.links;
+      return marked.parser(t);
+    }, own);
     return html;
   }
 
@@ -206,12 +230,41 @@ export function createMarkdownRenderer({ DOMPurify, map = emojiMap }) {
     });
   }
 
+  /**
+   * 目次用の見出しの一覧（トップレベルの見出しだけ。引用・リストの中の見出しは含めない）
+   * 表示と同じ字句解析を使うので、コードブロックの中の # 等は見出しにならない。setext 形式（=== / ---）も含む
+   * @returns {{level: number, text: string, line: number}[]} text は記法・タグを除いた文字、line は 0 始まりのソース行
+   */
+  function headings(src) {
+    footnotes = createFootnoteState();
+    const tokens = marked.lexer(src);
+    const list = [];
+    let pos = 0;
+    let line = 0;
+    for (const token of tokens) {
+      const at = token.raw ? src.indexOf(token.raw, pos) : -1;
+      if (at >= 0) {
+        line += countNewlines(src, pos, at);
+        pos = at;
+      }
+      if (token.type === 'heading') {
+        const text = stripTags(marked.Parser.parseInline(token.tokens, { ...marked.defaults, renderer: marked.defaults.renderer })).trim();
+        list.push({ level: token.depth, text: text || '（空の見出し）', line });
+      }
+      if (at >= 0) {
+        line += countNewlines(src, pos, pos + token.raw.length);
+        pos += token.raw.length;
+      }
+    }
+    return list;
+  }
+
   /** 改行だけでも改行して表示するか（行末の半角スペース 2 つが無くても <br> にする） */
   function setBreaks(breaks) {
     marked.setOptions({ breaks: Boolean(breaks) });
   }
 
-  return { render, toHtml, setBreaks };
+  return { render, toHtml, setBreaks, headings };
 }
 
 function countNewlines(s, from, to) {

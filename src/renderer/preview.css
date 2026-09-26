@@ -40,9 +40,10 @@
   max-width: var(--pv-max-width, 980px);
   margin: 0 auto;
   padding: 24px 40px 40vh;
-  font-family: -apple-system, 'Segoe UI', 'Yu Gothic UI', 'Meiryo', 'Noto Sans JP', sans-serif;
+  /* フォント・行間は設定画面の「表示」で選ぶ（アプリ側がホスト要素に --pv-font / --pv-line を設定する） */
+  font-family: var(--pv-font, -apple-system, 'Segoe UI', 'Yu Gothic UI', 'Meiryo', 'Noto Sans JP', sans-serif);
   font-size: 15px;
-  line-height: 1.7;
+  line-height: var(--pv-line, 1.7);
   word-wrap: break-word;
 }
 .markdown-body > :first-child {
@@ -226,4 +227,92 @@ summary {
 pre code.hljs {
   padding: 0;
   background: transparent;
+}
+
+/* リンク切れ（アプリが検出して付ける。リンク先のファイル・見出しが無い） */
+.markdown-body a.mvp-broken {
+  text-decoration: underline wavy light-dark(#cf222e, #f85149);
+  text-underline-offset: 3px;
+}
+.markdown-body img.mvp-broken {
+  outline: 2px dashed light-dark(#cf222e, #f85149);
+  outline-offset: 2px;
+}
+/* 指定行へ移動・次のリンク切れへ移動したときに、その場所を一瞬強調する */
+.markdown-body .mvp-flash {
+  animation: mvp-flash 1.2s ease-out;
+}
+@keyframes mvp-flash {
+  from {
+    background-color: var(--pv-mark);
+    box-shadow: 0 0 0 4px var(--pv-mark);
+  }
+  to {
+    background-color: transparent;
+    box-shadow: 0 0 0 4px transparent;
+  }
+}
+
+/* GitHub のアラート（> [!NOTE] など）。色は種類ごと、明暗に合わせる */
+.markdown-alert {
+  --alert-color: light-dark(#0969da, #4493f8);
+  margin: 0 0 16px;
+  padding: 8px 16px;
+  border-left: 4px solid var(--alert-color);
+  color: inherit;
+}
+.markdown-alert-tip {
+  --alert-color: light-dark(#1a7f37, #3fb950);
+}
+.markdown-alert-important {
+  --alert-color: light-dark(#8250df, #ab7df8);
+}
+.markdown-alert-warning {
+  --alert-color: light-dark(#9a6700, #d29922);
+}
+.markdown-alert-caution {
+  --alert-color: light-dark(#cf222e, #f85149);
+}
+.markdown-alert > :last-child {
+  margin-bottom: 0;
+}
+.markdown-alert .markdown-alert-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 0 4px;
+  color: var(--alert-color);
+  font-weight: 600;
+  line-height: 1.25;
+}
+.markdown-alert-title .octicon {
+  flex: none;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.5;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+/* 脚注: 本文の参照は小さな上付き番号、一覧は文書の最後に区切り線の下へ */
+.footnote-ref {
+  font-size: 0.75em;
+  line-height: 0;
+}
+.footnote-ref a,
+.footnote-backref {
+  text-decoration: none;
+}
+.footnotes {
+  margin-top: 32px;
+  padding-top: 12px;
+  border-top: 1px solid var(--pv-border);
+  color: var(--pv-muted);
+  font-size: 0.875em;
+}
+.footnotes ol {
+  padding-left: 2em;
+}
+.footnotes li p {
+  margin: 0 0 4px;
 }

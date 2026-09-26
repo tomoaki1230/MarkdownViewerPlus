@@ -1,6 +1,6 @@
 {
   "name": "markdown-viewer-plus",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "コードレビュワー向けの「直せる」Markdownビューア",
   "main": "src/main/main.js",
   "type": "module",
@@ -60,6 +60,7 @@
           "mkd",
           "mkdn"
         ],
+        "icon": "dist/file-icon.ico",
         "name": "Markdown",
         "description": "Markdown ファイル",
         "role": "Editor"

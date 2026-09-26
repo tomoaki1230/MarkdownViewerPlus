@@ -12,7 +12,12 @@ export const THEMES = ['system', 'light', 'dark'];
 // autoReload: ファイルが外部で変更されたら自動で読み直すか（既定はオン）
 // breaks: プレビューで改行だけでも改行する（行末の半角スペース 2 つが無くても）か
 // previewWidth: プレビューの表示幅（narrow / standard / wide / full）
+// confirmDiffOnSave: 上書き保存の前に変更点（差分）を確認するか（既定はしない）
+// changeMarks: 編集中、変更した行の横に印を出すか（既定は出す）
 export const PREVIEW_WIDTHS = ['narrow', 'standard', 'wide', 'full'];
+// previewFont / previewLineHeight: プレビューの本文のフォント・行間（ID はレンダラーの preview-style.js と一致させる）
+export const PREVIEW_FONTS = ['standard', 'ud', 'meiryo', 'mincho'];
+export const PREVIEW_LINE_HEIGHTS = ['compact', 'standard', 'relaxed', 'loose'];
 const DEFAULTS = {
   theme: 'system',
   lightTheme: DEFAULT_THEME_ID,
@@ -22,6 +27,10 @@ const DEFAULTS = {
   autoReload: true,
   breaks: false,
   previewWidth: 'standard',
+  confirmDiffOnSave: false,
+  changeMarks: true,
+  previewFont: 'standard',
+  previewLineHeight: 'standard',
   recent: [],
 };
 
@@ -36,10 +45,12 @@ export function loadSettings() {
     if (!THEMES.includes(settings.theme)) settings.theme = DEFAULTS.theme;
     if (!isThemeId('light', settings.lightTheme)) settings.lightTheme = DEFAULT_THEME_ID;
     if (!isThemeId('dark', settings.darkTheme)) settings.darkTheme = DEFAULT_THEME_ID;
-    for (const key of ['resident', 'disableGpu', 'autoReload', 'breaks']) {
+    for (const key of ['resident', 'disableGpu', 'autoReload', 'breaks', 'confirmDiffOnSave', 'changeMarks']) {
       if (typeof settings[key] !== 'boolean') settings[key] = DEFAULTS[key];
     }
     if (!PREVIEW_WIDTHS.includes(settings.previewWidth)) settings.previewWidth = DEFAULTS.previewWidth;
+    if (!PREVIEW_FONTS.includes(settings.previewFont)) settings.previewFont = DEFAULTS.previewFont;
+    if (!PREVIEW_LINE_HEIGHTS.includes(settings.previewLineHeight)) settings.previewLineHeight = DEFAULTS.previewLineHeight;
     settings.recent = Array.isArray(settings.recent)
       ? settings.recent.filter((p) => typeof p === 'string').slice(0, MAX_RECENT)
       : [];

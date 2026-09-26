@@ -61,16 +61,29 @@ export const SYNTAX_SECTIONS = [
     ],
   },
   {
+    title: 'GitHub の拡張',
+    items: [
+      {
+        name: 'アラート',
+        source: '> [!NOTE]\n> 補足の説明\n\n> [!WARNING]\n> 注意が必要な点',
+        note: '種類は NOTE（注記）/ TIP（ヒント）/ IMPORTANT（重要）/ WARNING（警告）/ CAUTION（注意）。1 行目は [!種類] だけを書く',
+      },
+      {
+        name: '脚注',
+        source: '本文に脚注を付ける[^1]。\n\n[^1]: 脚注の文章。文書の最後にまとめて表示される',
+        note: '番号をクリックすると脚注へ、↩ で本文へ戻る。[^名前] のように名前も使える',
+      },
+    ],
+  },
+  {
     title: '絵文字',
     items: [{ name: '絵文字', source: ':smile: :+1: :heart: :rocket: :memo:', note: 'GitHub と同じ名前が使える。登録されていない名前は文字のまま表示する' }],
   },
 ];
 
 export const UNSUPPORTED_SYNTAX = [
-  '脚注（[^1]）',
   '数式（$...$）',
   'Mermaid・PlantUML の図',
-  'GitHub のアラート（> [!NOTE] など）',
   'Qiita のメッセージ（:::note）',
   'コード内の色の表示（`#f00` の色見本）',
 ];

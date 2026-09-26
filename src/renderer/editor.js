@@ -2,6 +2,14 @@
 // 文字の描画（色分け・検索ヒット・行番号）は鏡が担い、入力・キャレット・選択・IME は textarea が担う。
 import { buildLineElement, computeLineClasses, distributeHits, tokenizeLine } from './mirror.js';
 
+const MARK_CLASSES = ['chg-mod', 'chg-add', 'chg-del', 'chg-del-end'];
+
+// 行の箱に変更の目印のクラスを付け替える
+function applyLineMark(node, mark) {
+  for (const c of MARK_CLASSES) if (c !== `chg-${mark}`) node.classList.remove(c);
+  if (mark) node.classList.add(`chg-${mark}`);
+}
+
 export class MirrorEditor {
   /**
    * @param {{textarea: HTMLTextAreaElement, mirror: HTMLElement, root: HTMLElement,
@@ -21,6 +29,8 @@ export class MirrorEditor {
     this.digits = 0;
     this.refreshQueued = false;
     this.debug = false;
+    // 変更箇所の目印（行番号 → 'mod' | 'add' | 'del' | 'del-end'）。行番号の横に色の印を出す
+    this.lineMarks = new Map();
     // 休止中（表示モードでエディタが隠れているとき）は鏡を作らない。stale は「鏡が textarea に追いついていない」印
     this.suspended = true;
     this.stale = true;
@@ -85,6 +95,20 @@ export class MirrorEditor {
     this.matches = matches;
     this.currentMatch = currentIndex;
     this.refresh();
+  }
+
+  /**
+   * 変更箇所の目印を設定する（鏡の行の箱にクラスを付けるだけで、文字は変えない）。
+   * 鏡を作っていないときは覚えておき、作るときに付ける
+   */
+  setLineMarks(marks) {
+    const prev = this.lineMarks;
+    this.lineMarks = marks;
+    if (this.stale) return;
+    for (const i of new Set([...prev.keys(), ...marks.keys()])) {
+      const node = this.lineNodes[i];
+      if (node) applyLineMark(node, marks.get(i));
+    }
   }
 
   /** 休止の切り替え。再開したときに鏡が古ければ作り直す */
@@ -165,6 +189,7 @@ export class MirrorEditor {
       const hitClass = hits.length === 0 ? '' : hits.some((h) => h.current) ? ' ln-hit ln-hit-cur' : ' ln-hit';
       const el = buildLineElement(doc, lines[i], `${lineClasses[i]}${hitClass}`.trim(), tokens, hits, !isLast);
       el.__key = key;
+      applyLineMark(el, this.lineMarks.get(i));
       if (node) {
         node.replaceWith(el);
       } else {
@@ -210,8 +235,14 @@ export class MirrorEditor {
     return lo + Math.min(1, Math.max(0, (y - node.offsetTop) / h));
   }
 
-  /** 表示先頭の行（小数付き） */
+  /**
+   * 表示先頭の行（小数付き）。最後に scrollToLine で合わせてから利用者がスクロールも入力もしていなければ、
+   * 測り直さずにその行を返す（scrollTop の整数への丸めで、拡大縮小の繰り返しのたびに 1px ずつずれるのを防ぐ）
+   */
   topLine() {
+    const memo = this.lineMemo;
+    if (memo && memo.scrollTop === this.textarea.scrollTop && memo.value === this.textarea.value) return memo.line;
+    this.lineMemo = null;
     return this.lineAtOffset(this.textarea.scrollTop + this.paddingTop());
   }
 
@@ -223,6 +254,7 @@ export class MirrorEditor {
     const y = node.offsetTop + (line - i) * node.offsetHeight - this.paddingTop();
     this.textarea.scrollTop = Math.max(0, y);
     this.syncMirrorScroll();
+    this.lineMemo = { scrollTop: this.textarea.scrollTop, value: this.textarea.value, line };
   }
 
   paddingTop() {

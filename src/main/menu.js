@@ -7,6 +7,18 @@
 import { Menu } from 'electron';
 import path from 'node:path';
 
+// アクセスキーを「ファイル(F)」の形で見せる。Chromium は「(&F)」の形のアクセスキーを括弧ごと表示から消す
+// （実測: 「ファイル(&F)」は「ファイル」とだけ表示される）。括弧の直後にゼロ幅スペースを入れると消されずに
+// 「ファイル(F)」と表示される。& の後の文字は変わらないので、アクセスキー（Alt+F・項目の文字キー）はそのまま使える
+const ZWSP = '\u200B';
+function showAccessKeys(items) {
+  for (const item of items) {
+    if (typeof item.label === 'string') item.label = item.label.replace(/\((&[^&])\)/, `(${ZWSP}$1)`);
+    if (Array.isArray(item.submenu)) showAccessKeys(item.submenu);
+  }
+  return items;
+}
+
 // メニューのラベルでは & がアクセスキー扱いになるためエスケープする
 function escapeLabel(text) {
   return text.replace(/&/g, '&&');
@@ -67,6 +79,9 @@ export function buildMenu(ui, settings, actions) {
         { label: '検索(&F)', ...key('Ctrl+F'), enabled: ui.hasDoc, click: cmd('find') },
         { label: '次を検索(&N)', ...key('F3'), enabled: ui.hasDoc, click: cmd('find-next') },
         { label: '前を検索(&V)', ...key('Shift+F3'), enabled: ui.hasDoc, click: cmd('find-prev') },
+        { type: 'separator' },
+        { label: '指定行へ移動(&G)...', ...key('Ctrl+G'), enabled: ui.hasDoc, click: cmd('goto') },
+        { label: '変更点を確認(&D)...', ...key('Ctrl+D'), enabled: ui.hasDoc, click: cmd('show-changes') },
       ],
     },
     {
@@ -74,11 +89,14 @@ export function buildMenu(ui, settings, actions) {
       submenu: [
         // 明暗・カラーテーマはテーマ画面 1 か所で選ぶ（ツールバーの明暗ボタンも同じ画面を開く）
         { label: 'テーマ(&T)...', click: cmd('theme-picker') },
+        // プレビューの本文のフォント・行間（見本を見ながら選ぶ画面を開く）
+        { label: 'フォントと行間(&F)...', click: cmd('font-settings') },
       ],
     },
     {
       label: 'ヘルプ(&H)',
       submenu: [
+        { label: 'キーボード ショートカット(&K)', ...key('F1'), click: cmd('shortcuts') },
         { label: 'Markdown 記法の一覧(&M)', click: cmd('syntax-help') },
         { type: 'separator' },
         { label: 'サードパーティのライセンス(&L)', click: cmd('licenses') },
@@ -86,5 +104,5 @@ export function buildMenu(ui, settings, actions) {
       ],
     },
   ];
-  return Menu.buildFromTemplate(template);
+  return Menu.buildFromTemplate(showAccessKeys(template));
 }

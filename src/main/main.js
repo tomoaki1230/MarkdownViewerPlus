@@ -1,5 +1,5 @@
 // メインプロセス: ウィンドウ管理（1ウィンドウ1ファイル）・予備ウィンドウ・トレイ常駐・ファイル入出力
-import { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, nativeTheme, screen, shell, Tray } from 'electron';
+import { app, BrowserWindow, desktopCapturer, dialog, ipcMain, Menu, nativeImage, nativeTheme, screen, shell, Tray } from 'electron';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -10,7 +10,7 @@ import { buildMenu } from './menu.js';
 import { buildOpenNotice, OpenNotice } from './open-notice.js';
 import { pushRecent, removeRecent } from './recent.js';
 import { findTheme, isThemeId } from '../shared/themes.js';
-import { loadSettings, PREVIEW_WIDTHS, saveSettings, THEMES } from './settings.js';
+import { loadSettings, PREVIEW_FONTS, PREVIEW_LINE_HEIGHTS, PREVIEW_WIDTHS, saveSettings, THEMES } from './settings.js';
 
 // 起動時間の計測（MVP_TRACE=1 のときだけ、プロセス起動からの経過時間を標準出力へ出す）
 const TRACE = Boolean(process.env.MVP_TRACE);
@@ -116,6 +116,9 @@ function createWindowContext({ isSpare }) {
 
   win.on('close', (e) => onWindowClose(ctx, e));
   win.on('closed', () => {
+    // 閉じた後にメニューの作り直し（30ms 間引き）が走ると、破棄済みのウィンドウに触れて例外になるので取り消す
+    clearTimeout(ctx.menuTimer);
+    ctx.menuTimer = null;
     unwatchDocument(ctx);
     contexts.delete(id);
     if (spare === ctx) spare = null;
@@ -148,6 +151,8 @@ function createWindowContext({ isSpare }) {
       autoReload: settings.autoReload ? '1' : '0',
       breaks: settings.breaks ? '1' : '0',
       width: settings.previewWidth,
+      font: settings.previewFont,
+      lineHeight: settings.previewLineHeight,
     },
   });
   return ctx;
@@ -741,38 +746,74 @@ function onWindowClose(ctx, e) {
   confirmCloseDirty(ctx);
 }
 
+/**
+ * 未保存の変更をどうするか聞く（保存する / 保存しない / キャンセル）。「保存する」なら保存まで行う
+ * @returns {Promise<'saved' | 'discard' | 'cancel'>} 保存できなかったときも 'cancel'
+ */
+async function askSaveChanges(ctx) {
+  if (ctx.win.isMinimized()) ctx.win.restore();
+  ctx.win.show();
+  ctx.win.focus();
+  const { response } = await dialog.showMessageBox(ctx.win, {
+    type: 'question',
+    title: APP_NAME,
+    message: `「${path.basename(ctx.doc.path)}」の変更を保存しますか？`,
+    buttons: ['保存する', '保存しない', 'キャンセル'],
+    defaultId: 0,
+    cancelId: 2,
+    noLink: true,
+  });
+  if (response === 2) return 'cancel';
+  if (response === 0) {
+    const text = await ctx.win.webContents.executeJavaScript('window.__mvpGetText()');
+    const result = await saveDocument(ctx, text);
+    return result.ok ? 'saved' : 'cancel';
+  }
+  return 'discard';
+}
+
+// 1 つのウィンドウを閉じるとき（Ctrl+W・×・ファイル > 閉じる）
 async function confirmCloseDirty(ctx) {
   if (ctx.confirming) return;
   ctx.confirming = true;
   try {
-    if (ctx.win.isMinimized()) ctx.win.restore();
-    ctx.win.show();
-    const { response } = await dialog.showMessageBox(ctx.win, {
-      type: 'question',
-      title: APP_NAME,
-      message: `「${path.basename(ctx.doc.path)}」の変更を保存しますか？`,
-      buttons: ['保存する', '保存しない', 'キャンセル'],
-      defaultId: 0,
-      cancelId: 2,
-      noLink: true,
-    });
-    if (response === 2) {
+    if ((await askSaveChanges(ctx)) === 'cancel') {
+      // 終了の途中（終了の確認の後に未保存になった等）で止めたときは、終了もやめる
       isQuitting = false;
       return;
-    }
-    if (response === 0) {
-      const text = await ctx.win.webContents.executeJavaScript('window.__mvpGetText()');
-      const result = await saveDocument(ctx, text);
-      if (!result.ok) {
-        isQuitting = false;
-        return;
-      }
     }
     ctx.forceClose = true;
     ctx.win.close();
     if (isQuitting) app.quit();
   } finally {
     ctx.confirming = false;
+  }
+}
+
+// 終了するとき: ウィンドウを 1 つも閉じる前に、未保存のウィンドウを順に確認する。
+// 1 つでも「キャンセル」なら何も閉じずに終了をやめる（途中で閉じると、キャンセルしたのに
+// 未保存でないウィンドウだけが閉じてしまうため）。すべて決まったら、確認済みとして終了し直す
+let quitConfirming = false;
+let quitConfirmed = false;
+async function confirmQuit(dirty) {
+  if (quitConfirming) return;
+  quitConfirming = true;
+  const decided = [];
+  try {
+    for (const ctx of dirty) {
+      if (ctx.win.isDestroyed() || !ctx.dirty) continue;
+      if ((await askSaveChanges(ctx)) === 'cancel') {
+        // 「保存しない」と決めた後でキャンセルされたウィンドウは、未保存のまま残す（閉じるときは改めて確認する）
+        for (const c of decided) c.forceClose = false;
+        return;
+      }
+      ctx.forceClose = true;
+      decided.push(ctx);
+    }
+    quitConfirmed = true;
+    app.quit();
+  } finally {
+    quitConfirming = false;
   }
 }
 
@@ -836,7 +877,8 @@ function updateMenu(ctx) {
 }
 
 function applyMenu(ctx) {
-  if (ctx.win.isDestroyed()) return;
+  ctx.menuTimer = null;
+  if (ctx.win.isDestroyed() || !contexts.has(ctx.win.webContents.id)) return;
   const ui = { mode: ctx.mode, hasDoc: Boolean(ctx.doc), dirty: ctx.dirty };
   // 作ったメニューは状態として保持する（BrowserWindow からは取り出せないため。E2E でも参照する）
   ctx.menu = buildMenu(ui, settings, {
@@ -848,7 +890,12 @@ function applyMenu(ctx) {
     openRecent: (file) => openFile(file, ctx.doc ? null : ctx),
     clearRecent,
   });
-  ctx.win.setMenu(ctx.menu);
+  try {
+    ctx.win.setMenu(ctx.menu);
+  } catch (err) {
+    // 閉じる途中のウィンドウ（破棄の直前）では付けられないことがある。付けられなくても困らない
+    log(`メニューを付けられなかった: ${err.message}`);
+  }
 }
 
 // テーマ: nativeTheme.themeSource を切り替えると、全ウィンドウの prefers-color-scheme とタイトルバーが追従する
@@ -947,6 +994,10 @@ const APP_SETTINGS = {
   autoReload: (v) => typeof v === 'boolean',
   breaks: (v) => typeof v === 'boolean',
   previewWidth: (v) => PREVIEW_WIDTHS.includes(v),
+  confirmDiffOnSave: (v) => typeof v === 'boolean',
+  changeMarks: (v) => typeof v === 'boolean',
+  previewFont: (v) => PREVIEW_FONTS.includes(v),
+  previewLineHeight: (v) => PREVIEW_LINE_HEIGHTS.includes(v),
 };
 
 function appSettingsState() {
@@ -1110,6 +1161,28 @@ function registerIpc() {
     else if (fs.existsSync(target)) shell.showItemInFolder(target);
   });
   ipcMain.on('app:open-external', (_e, url) => openExternalSafe(url));
+  // 外部で変更されたファイルの今の内容（差分表示用。読むだけで、開いている文書には反映しない）
+  ipcMain.handle('doc:read-disk', (e) => {
+    const ctx = ctxFromEvent(e);
+    if (!ctx?.doc) return { ok: false, error: 'ファイルが開かれていません' };
+    try {
+      return { ok: true, text: readDocument(ctx.doc.path).base.text };
+    } catch (err) {
+      return { ok: false, error: readErrorText(err) };
+    }
+  });
+  // プレビューのリンク切れの検出: file: の URL が指すファイル（フォルダ）があるか。存在の確認だけで中身は読まない
+  ipcMain.handle('doc:check-files', (_e, urls) => {
+    if (!Array.isArray(urls)) return [];
+    return urls.slice(0, 5000).map((u) => {
+      if (typeof u !== 'string' || !u.startsWith('file:')) return false;
+      try {
+        return fs.existsSync(fileURLToPath(u));
+      } catch {
+        return false;
+      }
+    });
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -1177,7 +1250,18 @@ if (!app.requestSingleInstanceLock()) {
     }
   });
 
-  app.on('before-quit', () => {
+  app.on('before-quit', (e) => {
+    // 未保存のウィンドウがあれば、閉じ始める前にまとめて確認する（confirmQuit）
+    if (!quitConfirmed) {
+      const dirty = visibleContexts().filter((c) => c.doc && c.dirty && !c.forceClose);
+      if (dirty.length > 0) {
+        e.preventDefault();
+        confirmQuit(dirty);
+        return;
+      }
+    }
+    // 確認済みは 1 回だけ有効（終了が途中で止まったら、次の終了では改めて確認する）
+    quitConfirmed = false;
     isQuitting = true;
     clearTimeout(spareTimer);
     if (spare && !spare.win.isDestroyed()) spare.win.destroy();
@@ -1206,7 +1290,7 @@ if (!app.requestSingleInstanceLock()) {
 
     // E2E テスト用: main のインスペクタから dialog を差し替えたり状態を参照できるようにする
     if (process.env.MVP_E2E) {
-      globalThis.__mvp = { app, dialog, shell, Menu, contexts, openFile, openFiles, openEmptyWindow, visibleContexts, cascadePosition, get spare() { return spare; }, get tray() { return tray; } };
+      globalThis.__mvp = { app, dialog, shell, Menu, desktopCapturer, contexts, openFile, openFiles, openEmptyWindow, visibleContexts, cascadePosition, get spare() { return spare; }, get tray() { return tray; } };
     }
   });
 }

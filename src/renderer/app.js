@@ -1,11 +1,19 @@
 // レンダラーのエントリポイント
 import DOMPurify from 'dompurify';
+import { createDiffDialog } from './diff-dialog.js';
 import { MirrorEditor } from './editor.js';
 import { emojiMap } from './emoji.js';
+import { createGotoDialog } from './goto-dialog.js';
+import { countChanges, diffLines, lineMarks } from './line-diff.js';
+import { findBrokenLinks } from './link-check.js';
+import { createTocPanel } from './toc-panel.js';
+import { previewFontCss, previewLineHeight } from './preview-style.js';
 import { createMarkdownRenderer } from './markdown.js';
 import { buildTextIndex, rangeFor } from './preview-search.js';
 import { findMatches, indexAtOrAfter } from './search.js';
+import { createFontDialog } from './font-dialog.js';
 import { createSettingsDialog } from './settings-dialog.js';
+import { createShortcutsHelp } from './shortcuts-help.js';
 import { createSyntaxHelp } from './syntax-help.js';
 import { createThemePicker } from './theme-picker.js';
 import { findTheme, themeCssVars } from '../shared/themes.js';
@@ -23,7 +31,6 @@ try {
 const api = window.mvp;
 const APP_NAME = 'MarkdownViewerPlus';
 const MODE_LABELS = { view: '表示モード', edit: '編集モード', split: '2ペイン' };
-const THEME_LABELS = { system: 'システムに従う', light: 'ライト', dark: 'ダーク' };
 const $ = (sel) => document.querySelector(sel);
 
 const els = {
@@ -34,12 +41,17 @@ const els = {
   btnAutoReload: $('#btn-auto-reload'),
   btnBreaks: $('#btn-breaks'),
   btnWidth: $('#btn-width'),
-  btnTheme: $('#btn-theme'),
+  btnMarks: $('#btn-marks'),
+  btnToc: $('#btn-toc'),
+  toc: $('#toc'),
+  tocList: $('#toc-list'),
+  tocClose: $('#toc-close'),
   modeButtons: [...document.querySelectorAll('[data-mode]')],
   tools: $('#tools'),
   banner: $('#banner'),
   bannerText: $('#banner-text'),
   bannerReload: $('#banner-reload'),
+  bannerDiff: $('#banner-diff'),
   bannerClose: $('#banner-close'),
   workspace: $('#workspace'),
   editorPane: $('#editor-pane'),
@@ -79,6 +91,8 @@ const els = {
   stChars: $('#st-chars'),
   stMode: $('#st-mode'),
   stMessage: $('#st-message'),
+  stLinks: $('#st-links'),
+  stExternal: $('#st-external'),
 };
 
 const state = {
@@ -92,6 +106,11 @@ const state = {
   scrollLock: { source: null, until: 0 },
   search: { open: false, matches: [], current: -1, error: null, truncated: false },
   saving: false,
+  changeCount: 0, // 保存済みの内容からの変更の数（変更のまとまりの数）
+  brokenLinks: [], // プレビューのリンク切れの要素
+  brokenIndex: -1,
+  // 外部での変更の通知（通知バナーを閉じても、ステータスバーの印から出し直せるように覚えておく）
+  external: null, // { text, options, label }
 };
 
 // ---------------------------------------------------------------------------
@@ -120,6 +139,7 @@ function renderPreview({ force = false } = {}) {
   for (const img of article.querySelectorAll('img')) {
     if (!img.complete) img.addEventListener('load', () => (state.anchors = null), { once: true });
   }
+  scheduleLinkCheck();
 }
 
 function schedulePreview() {
@@ -186,17 +206,237 @@ article.addEventListener('click', (e) => {
   else api.openExternal(url.href);
 });
 
-// 2 ペイン時: プレビューをダブルクリックすると、対応するソース行へキャレットを移す
+// 表示の文字をダブルクリック →「ここを直す」: 表示モードなら 2 ペインに切り替え、編集側で同じ文字を選択する
+// （ダブルクリックで選ばれた語を、そのブロックのソース行の範囲から探す。見つからなければブロックの先頭行へ）
 article.addEventListener('dblclick', (e) => {
-  if (state.mode !== 'split') return;
+  if (!state.doc || e.target.closest('a[href], input, button, summary, select, textarea')) return;
   const block = e.target.closest('[data-line]');
   if (!block) return;
+  const word = selectedWordIn(block);
+  if (state.mode === 'view') setMode('split');
+  revealSourceOf(block, word);
+});
+
+/** ダブルクリックで選ばれた語と、それがブロックの中で何番目に出てくるか */
+function selectedWordIn(block) {
+  const sel = shadow.getSelection?.() ?? document.getSelection();
+  if (!sel || sel.rangeCount === 0) return null;
+  const text = sel.toString().trim();
+  if (!text || text.length > 200 || text.includes('\n')) return null;
+  const range = sel.getRangeAt(0);
+  if (!block.contains(range.startContainer)) return null;
+  const before = document.createRange();
+  before.setStart(block, 0);
+  before.setEnd(range.startContainer, range.startOffset);
+  let nth = 0;
+  const head = before.toString();
+  for (let i = head.indexOf(text); i >= 0; i = head.indexOf(text, i + text.length)) nth++;
+  return { text, nth };
+}
+
+/** ブロックに対応するソースの場所へキャレットを移し、選ばれた語があればそれを選択する */
+function revealSourceOf(block, word) {
   const line = Number(block.dataset.line);
-  const pos = editor.offsetOfLine(line);
-  els.textarea.focus();
-  els.textarea.setSelectionRange(pos, pos);
-  editor.revealRange(pos);
+  const next = getAnchors().find((a) => a.line > line);
+  const start = editor.offsetOfLine(line);
+  const end = next ? editor.offsetOfLine(next.line) : editor.value.length;
+  let selStart = start;
+  let selEnd = start;
+  if (word) {
+    const src = editor.value.slice(start, end);
+    const found = [];
+    for (let i = src.indexOf(word.text); i >= 0; i = src.indexOf(word.text, i + word.text.length)) found.push(i);
+    if (found.length > 0) {
+      selStart = start + found[Math.min(word.nth, found.length - 1)];
+      selEnd = selStart + word.text.length;
+    }
+  }
+  // 編集側を動かしたことでプレビューが連動して動かないようにする（クリックした場所を見失わないように）
+  state.scrollLock = { source: 'preview', until: performance.now() + 400 };
+  els.textarea.focus({ preventScroll: true });
+  els.textarea.setSelectionRange(selStart, selEnd);
+  editor.revealRange(selStart);
   updateCaretStatus();
+}
+
+// ---------------------------------------------------------------------------
+// リンク切れの検出（相対パスのファイル・画像が無い、#見出しが無い）。外部のリンクは調べない
+// ---------------------------------------------------------------------------
+
+let linkTimer = null;
+let linkSeq = 0;
+const fileExistsCache = new Map(); // URL → { ok, at }
+const FILE_EXISTS_TTL = 2000;
+
+async function filesExist(urls) {
+  const now = Date.now();
+  const ask = urls.filter((u) => !(fileExistsCache.get(u)?.at > now - FILE_EXISTS_TTL));
+  if (ask.length > 0) {
+    const result = await api.checkFiles(ask);
+    ask.forEach((u, i) => fileExistsCache.set(u, { ok: Boolean(result?.[i]), at: now }));
+  }
+  return urls.map((u) => fileExistsCache.get(u)?.ok ?? true);
+}
+
+function scheduleLinkCheck() {
+  clearTimeout(linkTimer);
+  linkTimer = setTimeout(checkLinks, 250);
+}
+
+async function checkLinks() {
+  if (!state.doc) return;
+  const seq = ++linkSeq;
+  const broken = await findBrokenLinks(shadow, {
+    baseUrl: state.doc.baseUrl ?? null,
+    exists: filesExist,
+    hasAnchor: (id) => Boolean(shadow.getElementById(id) ?? article.querySelector(`[name="${CSS.escape(id)}"]`)),
+  });
+  // 調べている間に描き直されたら、新しい結果に任せる
+  if (seq !== linkSeq) return;
+  for (const e of article.querySelectorAll('.mvp-broken')) e.classList.remove('mvp-broken');
+  for (const { el, reason } of broken) {
+    el.classList.add('mvp-broken');
+    el.title = reason;
+  }
+  state.brokenLinks = broken.map((b) => b.el);
+  state.brokenIndex = -1;
+  updateLinkStatus();
+}
+
+// ステータスバーの「リンク切れ N」（プレビューを出していないモードでは出さない）
+function updateLinkStatus() {
+  const n = state.doc && state.mode !== 'edit' ? state.brokenLinks.filter((e) => e.isConnected).length : 0;
+  els.stLinks.hidden = n === 0;
+  els.stLinks.textContent = n > 0 ? `リンク切れ ${n}` : '';
+}
+
+// 次のリンク切れへ（プレビューをスクロールして一瞬強調する）
+function nextBrokenLink() {
+  const list = state.brokenLinks.filter((e) => e.isConnected);
+  if (list.length === 0 || state.mode === 'edit') return;
+  state.brokenIndex = (state.brokenIndex + 1) % list.length;
+  const target = list[state.brokenIndex];
+  els.preview.scrollTop += target.getBoundingClientRect().top - els.preview.getBoundingClientRect().top - 60;
+  flash(target);
+}
+
+function flash(node) {
+  node.classList.remove('mvp-flash');
+  void node.offsetWidth;
+  node.classList.add('mvp-flash');
+  setTimeout(() => node.classList.remove('mvp-flash'), 1300);
+}
+
+// ---------------------------------------------------------------------------
+// 目次（見出しの一覧）: ツールバーの目次ボタン / Ctrl+Shift+O で開閉。開閉の状態はウィンドウ間で共有して覚える
+// ---------------------------------------------------------------------------
+
+const tocPanel = createTocPanel({ panel: els.toc, list: els.tocList, onSelect: gotoHeading });
+let tocTimer = null;
+let tocCurrentTimer = null;
+
+function readTocOpen() {
+  try {
+    return localStorage.getItem('mvp.toc') === '1';
+  } catch {
+    return false;
+  }
+}
+
+function setTocOpen(open, { save = true } = {}) {
+  // 本文の幅が変わって折り返しが変わっても、読んでいる位置（ソース行）を保つ
+  const line = state.doc ? (state.mode === 'view' ? previewTopLine() : editor.topLine()) : null;
+  els.toc.hidden = !open;
+  els.btnToc.setAttribute('aria-pressed', String(open));
+  els.btnToc.title = `目次: ${open ? '表示中' : '非表示'} (Ctrl+Shift+O)`;
+  if (save) {
+    try {
+      localStorage.setItem('mvp.toc', open ? '1' : '0');
+    } catch {
+      // 保存できなくても動作に影響しない
+    }
+  }
+  // 本文の幅が変わるので、プレビューの位置の対応を取り直す
+  state.anchors = null;
+  if (line !== null) {
+    if (state.mode === 'view') scrollPreviewToLine(line);
+    else {
+      editor.scrollToLine(line);
+      if (state.mode === 'split') syncScroll('editor');
+    }
+  }
+  if (open) updateToc();
+}
+
+function toggleToc() {
+  if (!state.doc) return;
+  setTocOpen(els.toc.hidden);
+}
+
+/** 見出しの一覧を作り直す（閉じているときは作らない） */
+function updateToc() {
+  clearTimeout(tocTimer);
+  tocTimer = null;
+  if (!state.doc || els.toc.hidden) return;
+  tocPanel.setHeadings(md.headings(editor.value));
+  updateTocCurrent();
+}
+
+// 入力のたびに作り直すと重いので間引く
+function scheduleToc() {
+  if (els.toc.hidden) return;
+  clearTimeout(tocTimer);
+  tocTimer = setTimeout(updateToc, 300);
+}
+
+/** 今読んでいる位置の見出しを強調する（表示・2 ペインはプレビュー、編集モードは編集側の表示先頭の行） */
+function updateTocCurrent() {
+  if (!state.doc || els.toc.hidden) return;
+  const line = state.mode === 'edit' ? editor.topLine() : previewTopLine();
+  // 見出しが表示の先頭より少し下にあっても、その見出しの節を読んでいるとみなす
+  tocPanel.setCurrentLine(Math.floor(line + 0.5));
+}
+
+function scheduleTocCurrent() {
+  if (els.toc.hidden || tocCurrentTimer) return;
+  tocCurrentTimer = setTimeout(() => {
+    tocCurrentTimer = null;
+    updateTocCurrent();
+  }, 60);
+}
+
+/** 目次の見出しをクリック: その見出しを表示の先頭にする（編集側はキャレットも見出しの行へ） */
+function gotoHeading(line) {
+  if (state.mode === 'view') {
+    scrollPreviewToLine(line);
+  } else {
+    const pos = editor.offsetOfLine(line);
+    els.textarea.focus({ preventScroll: true });
+    els.textarea.setSelectionRange(pos, pos);
+    editor.scrollToLine(line);
+    if (state.mode === 'split') {
+      state.scrollLock = { source: null, until: 0 };
+      scrollPreviewToLine(line);
+    }
+    updateCaretStatus();
+  }
+  // クリックした見出しを強調する（文書が短くてスクロールできず、表示の先頭が変わらないときも）
+  clearTimeout(tocCurrentTimer);
+  tocCurrentTimer = null;
+  tocPanel.setCurrentLine(line);
+}
+
+els.btnToc.addEventListener('click', toggleToc);
+els.tocClose.addEventListener('click', () => setTocOpen(false));
+// 他のウィンドウで開閉したら合わせる
+window.addEventListener('storage', (e) => {
+  if (e.key === 'mvp.toc') setTocOpen(e.newValue === '1', { save: false });
+});
+setTocOpen(readTocOpen(), { save: false });
+
+// 他のソフトでファイルを作った・消したかもしれないので、ウィンドウに戻ったら調べ直す
+window.addEventListener('focus', () => {
+  if (state.doc && state.mode !== 'edit') scheduleLinkCheck();
 });
 
 // ---------------------------------------------------------------------------
@@ -211,6 +451,7 @@ const editor = new MirrorEditor({
   onInput: onEditorInput,
   onScroll: () => {
     if (state.mode === 'split') syncScroll('editor');
+    if (state.mode === 'edit') scheduleTocCurrent();
   },
 });
 window.__mvpEditor = editor;
@@ -221,6 +462,7 @@ window.__mvpGetText = () => editor.value;
 
 function onEditorInput() {
   updateDirty();
+  scheduleToc();
   if (state.search.open) runSearch({ keepPosition: true });
   if (state.mode === 'split') schedulePreview();
   else state.renderedText = null;
@@ -237,6 +479,47 @@ function updateDirty() {
   els.btnSave.disabled = !dirty;
   els.stDirty.hidden = !dirty;
   scheduleCharCount();
+  scheduleChangeMarks();
+}
+
+// ---------------------------------------------------------------------------
+// 変更箇所の目印（保存済みの内容との差分を、エディタの行番号の横に出す）
+// ---------------------------------------------------------------------------
+
+let marksTimer = null;
+const savedLinesCache = { text: null, lines: [] };
+function savedLines() {
+  if (savedLinesCache.text !== state.savedText) {
+    savedLinesCache.text = state.savedText;
+    savedLinesCache.lines = state.savedText.split('\n');
+  }
+  return savedLinesCache.lines;
+}
+
+function updateChangeMarks() {
+  clearTimeout(marksTimer);
+  marksTimer = null;
+  if (!state.doc || !state.dirty) {
+    editor.setLineMarks(new Map());
+    state.changeCount = 0;
+  } else {
+    const lines = editor.value.split('\n');
+    const ops = diffLines(savedLines(), lines);
+    // 「変更した行に印」をオフにしているときは印を出さない（変更の数は数える）
+    editor.setLineMarks(appSettings.changeMarks ? lineMarks(ops, lines.length) : new Map());
+    state.changeCount = countChanges(ops);
+  }
+  els.stDirty.textContent = state.changeCount > 0 ? `● 未保存（変更 ${state.changeCount} か所）` : '● 未保存';
+}
+
+// 入力のたびに計算すると大きな文書で重くなるので、少し間引く（保存・読み直しで変更が無くなったときはすぐ消す）
+function scheduleChangeMarks() {
+  if (!state.dirty) {
+    updateChangeMarks();
+    return;
+  }
+  clearTimeout(marksTimer);
+  marksTimer = setTimeout(updateChangeMarks, 120);
 }
 
 // main へ未保存・モードを伝える（閉じる確認とメニューの有効/無効に使う）
@@ -318,6 +601,8 @@ function setMode(mode, { keepScroll = true } = {}) {
   notifyUiState();
   for (const b of els.modeButtons) b.setAttribute('aria-pressed', String(b.dataset.mode === mode));
   updatePreviewOnlyButtons(mode);
+  updateLinkStatus();
+  scheduleTocCurrent();
 
   if (mode !== 'edit') renderPreview();
   state.anchors = null;
@@ -359,11 +644,17 @@ function getAnchors() {
   return list;
 }
 
+// 最後にプログラムで合わせた表示位置（行）。利用者がスクロールしていなければ（scrollTop が同じなら）、
+// 位置を測り直さずにこの行を使う。scrollTop は整数に丸められるので、「測る → 描き直す → 合わせる」を
+// 繰り返すと 1px ずつずれていく（改行で折り返すの切り替え・拡大縮小の連打で表示が少しずつ上へ詰まる）ため
+let previewLineMemo = null;
+
 function scrollPreviewToLine(line) {
   const anchors = getAnchors();
   const pv = els.preview;
   if (anchors.length === 0) {
     pv.scrollTop = 0;
+    previewLineMemo = null;
     return;
   }
   const totalLines = Math.max(editor.lineCount(), 1);
@@ -374,11 +665,14 @@ function scrollPreviewToLine(line) {
   const b = pts[i + 1];
   const ratio = b.line === a.line ? 0 : (line - a.line) / (b.line - a.line);
   pv.scrollTop = Math.max(0, a.top + ratio * (b.top - a.top) - 8);
+  previewLineMemo = { scrollTop: pv.scrollTop, line };
 }
 
 function previewTopLine() {
-  const anchors = getAnchors();
   const pv = els.preview;
+  if (previewLineMemo && previewLineMemo.scrollTop === pv.scrollTop) return previewLineMemo.line;
+  previewLineMemo = null;
+  const anchors = getAnchors();
   const y = pv.scrollTop + 8;
   if (anchors.length === 0) return 0;
   const totalLines = Math.max(editor.lineCount(), 1);
@@ -411,6 +705,7 @@ function syncScroll(source) {
 }
 els.preview.addEventListener('scroll', () => {
   if (state.mode === 'split') syncScroll('preview');
+  if (state.mode !== 'edit') scheduleTocCurrent();
 });
 new ResizeObserver(() => {
   state.anchors = null;
@@ -458,9 +753,12 @@ els.splitter.addEventListener('dblclick', () => {
   setSplit('50%');
   if (state.mode === 'split') requestAnimationFrame(() => syncScroll('editor'));
 });
+// 保存しておいた比率は、ドラッグで取り得る範囲（20〜80%）の「数値%」のときだけ使う
+// （壊れた値をそのまま CSS に入れると 2 ペインの列の指定が無効になり、編集側が幅 0 になるため）
 try {
   const split = localStorage.getItem('mvp.split');
-  if (split) els.workspace.style.setProperty('--split', split);
+  const m = /^(\d+(?:\.\d+)?)%$/.exec(split ?? '');
+  if (m && Number(m[1]) >= 20 && Number(m[1]) <= 80) els.workspace.style.setProperty('--split', split);
 } catch {
   // 無視
 }
@@ -837,7 +1135,38 @@ const TOOLS = {
     insertBlock(`\`\`\`\n${body}\n\`\`\`\n`, 4, body.length);
   },
   hr: () => insertBlock('\n---\n', 5, 0),
+  table: insertTable,
 };
+
+// 表のひな形（2 列 × 見出し + 1 行）を、カーソルのある行の次に挿入し、最初の見出しを選択する。
+// 前の行に文字があれば空行を挟む（段落の続きにしない）。後ろの行に文字があれば空行を挟む
+// （挟まないと、その行が表の行として取り込まれてしまう）
+const TABLE_TEMPLATE = '| 見出し | 見出し |\n| --- | --- |\n|  |  |';
+function insertTable() {
+  const ta = els.textarea;
+  const v = ta.value;
+  const lineStart = v.lastIndexOf('\n', ta.selectionEnd - 1) + 1;
+  let lineEnd = v.indexOf('\n', ta.selectionEnd);
+  if (lineEnd < 0) lineEnd = v.length;
+  const lineEmpty = v.slice(lineStart, lineEnd).trim() === '';
+  const nextStart = lineEnd + 1;
+  const nextEnd = v.indexOf('\n', nextStart) < 0 ? v.length : v.indexOf('\n', nextStart);
+  const nextHasText = lineEnd < v.length && v.slice(nextStart, nextEnd).trim() !== '';
+  const prevHasText = lineStart > 0 && v.slice(v.lastIndexOf('\n', lineStart - 2) + 1, lineStart - 1).trim() !== '';
+  // 文字のある行: その行末の後ろに空行を挟んで入れる
+  // 空の行で、前の行に文字がある: その空行を区切りとして残し、次の行に入れる
+  // 空の行で、前も空: その行（空白だけ）を置き換える
+  let at = lineEnd;
+  let head = '\n\n';
+  if (lineEmpty && prevHasText) head = '\n';
+  else if (lineEmpty) {
+    at = lineStart;
+    head = '';
+  }
+  const text = head + TABLE_TEMPLATE + (nextHasText ? '\n' : '');
+  const select = at + head.length + 2;
+  editor.replaceRange(at, lineEnd, text, { selectStart: select, selectEnd: select + 3 });
+}
 
 els.tools.addEventListener('mousedown', (e) => e.preventDefault()); // ボタン押下で textarea の選択を失わない
 els.tools.addEventListener('click', (e) => {
@@ -862,6 +1191,10 @@ const ACTIONS = {
     els.textarea.focus();
     document.execCommand('redo');
   },
+  // 変更点を確認（2 段目の右端）
+  'show-changes': () => showChanges(),
+  // 変更した行に印のオン / オフ（全ウィンドウ共通の設定）
+  'toggle-marks': () => api.setSetting('changeMarks', !appSettings.changeMarks),
   // 検索ボタン: 開いていれば閉じる（トグル）。対象は編集側
   find: () => {
     if (state.search.open) closeSearch();
@@ -900,6 +1233,7 @@ function setDocControlsEnabled(enabled) {
     els.btnSaveAs,
     els.btnReload,
     els.btnAutoReload,
+    els.btnToc,
     els.btnBreaks,
     els.btnWidth,
     els.btnZoomIn,
@@ -932,6 +1266,7 @@ function loadDocument(payload) {
   setMode('view', { keepScroll: false });
   els.preview.scrollTop = 0;
   els.textarea.scrollTop = 0;
+  updateToc();
 }
 
 function reloadDocument(payload) {
@@ -955,14 +1290,32 @@ function reloadDocument(payload) {
   if (mode === 'view') scrollPreviewToLine(line);
   else editor.scrollToLine(line);
   if (state.search.open) runSearch({ keepPosition: true });
+  updateToc();
   showMessage('外部の変更を読み込みました');
 }
 
-async function save() {
+/**
+ * 上書き保存
+ * @param {{skipDiffConfirm?: boolean}} [options] skipDiffConfirm: 変更点の確認画面から保存するとき（もう確認済み）
+ */
+async function save(options) {
   if (!state.doc || state.saving) return;
   if (!state.dirty) {
     showMessage('変更はありません');
     return;
+  }
+  // 設定「保存の前に変更点を確認する」: 差分を見せて、保存してよいか確かめる
+  if (appSettings.confirmDiffOnSave && !options?.skipDiffConfirm) {
+    const answer = await diffDialog.open({
+      title: '保存の前に変更点を確認',
+      note: `「${state.doc.name}」に保存する変更です。`,
+      sections: [{ heading: '保存済みの内容 → 保存する内容', oldText: state.savedText, newText: editor.value }],
+      buttons: [
+        { label: '保存する', value: 'save', primary: true },
+        { label: 'キャンセル', value: 'close' },
+      ],
+    });
+    if (answer !== 'save' || !state.doc || state.saving) return;
   }
   state.saving = true;
   try {
@@ -1184,9 +1537,13 @@ const themePicker = createThemePicker({
 // 画面から変更できる設定。表示に関わるものは main が URL のクエリでも渡す（最初の描画から正しく表示するため）
 let appSettings = {
   resident: false,
+  confirmDiffOnSave: false,
+  changeMarks: true,
   autoReload: bootParams.get('autoReload') !== '0',
   breaks: bootParams.get('breaks') === '1',
   previewWidth: bootParams.get('width') ?? 'standard',
+  previewFont: bootParams.get('font') ?? 'standard',
+  previewLineHeight: bootParams.get('lineHeight') ?? 'standard',
 };
 const PREVIEW_MAX_WIDTH = { narrow: '720px', standard: '980px', wide: '1280px', full: 'none' };
 const PREVIEW_WIDTH_LABELS = { narrow: '狭い', standard: '標準', wide: '広い', full: 'ウィンドウいっぱい' };
@@ -1196,18 +1553,29 @@ function applyAppSettings(next) {
   const prev = appSettings;
   appSettings = { ...appSettings, ...next };
   const s = appSettings;
+  // 改行の扱い・表示幅・フォント・行間が変わると折り返しが変わるので、変える前に読んでいる位置（ソース行）を測っておく
+  const layoutChanged =
+    prev.breaks !== s.breaks ||
+    prev.previewWidth !== s.previewWidth ||
+    prev.previewFont !== s.previewFont ||
+    prev.previewLineHeight !== s.previewLineHeight;
+  const line = layoutChanged && state.doc && state.mode === 'view' ? previewTopLine() : null;
   els.btnAutoReload.setAttribute('aria-pressed', String(s.autoReload));
   els.btnAutoReload.title = `自動再読み込み: ${s.autoReload ? 'オン' : 'オフ'}（ファイルが外部で変更されたら自動で読み直す）`;
   els.btnBreaks.setAttribute('aria-pressed', String(s.breaks));
   els.btnBreaks.title = `改行で折り返す: ${s.breaks ? 'オン' : 'オフ'}（行末の半角スペース 2 つが無くても、改行で改行して表示）`;
   els.btnWidth.title = `表示幅: ${PREVIEW_WIDTH_LABELS[s.previewWidth] ?? '標準'}（プレビューの本文の幅）`;
+  els.btnMarks.setAttribute('aria-pressed', String(s.changeMarks));
+  els.btnMarks.title = `変更した行に印: ${s.changeMarks ? 'オン' : 'オフ'}（保存済みの内容から変更・追加・削除した行の横に印を出す）`;
+  if (prev.changeMarks !== s.changeMarks) updateChangeMarks();
   els.preview.style.setProperty('--pv-max-width', PREVIEW_MAX_WIDTH[s.previewWidth] ?? '980px');
+  els.preview.style.setProperty('--pv-font', previewFontCss(s.previewFont));
+  els.preview.style.setProperty('--pv-line', previewLineHeight(s.previewLineHeight));
   md.setBreaks(s.breaks);
   settingsDialog.update(s);
-  // 改行の扱い・表示幅が変わったら、表示位置（ソース行）を保ったまま描き直す
-  const layoutChanged = prev.breaks !== s.breaks || prev.previewWidth !== s.previewWidth;
+  fontDialog.update(s);
+  // 改行の扱い・表示幅・フォント・行間が変わったら、表示位置（ソース行）を保ったまま描き直す
   if (layoutChanged && state.doc) {
-    const line = state.mode === 'view' ? previewTopLine() : null;
     if (prev.breaks !== s.breaks) {
       if (state.mode !== 'edit') renderPreview({ force: true });
       else state.renderedText = null;
@@ -1220,6 +1588,13 @@ function applyAppSettings(next) {
 const settingsDialog = createSettingsDialog({
   dialog: document.querySelector('#settings-dialog'),
   onResident: (on) => api.setSetting('resident', on),
+  onConfirmDiff: (on) => api.setSetting('confirmDiffOnSave', on),
+});
+// 表示 > フォントと行間...（プレビューの本文。見本を見ながら選ぶ）
+const fontDialog = createFontDialog({
+  dialog: document.querySelector('#font-dialog'),
+  onFont: (id) => api.setSetting('previewFont', id),
+  onLineHeight: (id) => api.setSetting('previewLineHeight', id),
 });
 function openSettings() {
   settingsDialog.open(appSettings);
@@ -1233,28 +1608,58 @@ function applyTheme(state) {
   const { theme } = themeState;
   els.body.dataset.theme = theme;
   document.documentElement.dataset.theme = theme;
-  els.btnTheme.title = `テーマ（明暗: ${THEME_LABELS[theme]}）。クリックで明暗とカラーテーマを選ぶ画面を開きます`;
   applyPalette();
   themePicker.update(themeState);
 }
-// 明暗・カラーテーマはテーマ画面 1 か所で選ぶ（表示 > テーマ... も同じ画面を開く）
-els.btnTheme.addEventListener('click', () => themePicker.open(themeState));
+// 明暗・カラーテーマはテーマ画面 1 か所で選ぶ（表示 > テーマ... で開く）
 api.onThemeChanged(applyTheme);
 applyTheme(themeState);
 api.getTheme().then(applyTheme);
 els.emptyOpen.addEventListener('click', () => api.openDialog());
 
-function showBanner(text, { reload = true } = {}) {
+/**
+ * 通知バナーを出す
+ * @param {{reload?: boolean, diff?: boolean, closeTitle?: string}} options closeTitle: 「×」を押すと何が起きるか
+ */
+function showBanner(text, { reload = true, diff = false, closeTitle = '閉じる' } = {}) {
   els.bannerText.textContent = text;
   els.bannerReload.hidden = !reload;
+  els.bannerDiff.hidden = !diff;
+  els.bannerClose.title = closeTitle;
+  els.bannerClose.setAttribute('aria-label', closeTitle);
   els.banner.hidden = false;
+  els.stExternal.hidden = true;
 }
+
+/** 外部での変更を知らせる（覚えておき、閉じた後もステータスバーから出し直せるようにする） */
+function showExternalNotice(text, options, label) {
+  state.external = { text, options, label };
+  showBanner(text, options);
+}
+
+/** 通知を片付ける（読み直し・保存などで外部での変更が解決したとき） */
 function hideBanner() {
   els.banner.hidden = true;
+  state.external = null;
+  els.stExternal.hidden = true;
+}
+
+/** 「×」: 通知を閉じるだけ（外部での変更は解決していないので、ステータスバーに印を残す） */
+function dismissBanner() {
+  els.banner.hidden = true;
+  if (state.external) {
+    els.stExternal.textContent = state.external.label;
+    els.stExternal.hidden = false;
+  }
 }
 // 通知バナーの「再読み込み」は、編集中の内容が失われる旨をバナーで伝えているので確認済みとして扱う
 els.bannerReload.addEventListener('click', () => reloadFromDisk(true));
-els.bannerClose.addEventListener('click', hideBanner);
+els.bannerClose.addEventListener('click', dismissBanner);
+// ステータスバーの「外部で変更あり」: 閉じた通知を出し直す
+els.stExternal.addEventListener('click', () => {
+  if (state.external) showBanner(state.external.text, state.external.options);
+});
+els.bannerDiff.addEventListener('click', () => showExternalDiff());
 
 let messageTimer = null;
 function showMessage(text) {
@@ -1324,6 +1729,7 @@ window.addEventListener('keydown', (e) => {
   const editing = state.doc && state.mode !== 'view';
 
   if (ctrl && e.shiftKey && !e.altKey && key === 's') return prevent(e, saveAs);
+  if (ctrl && e.shiftKey && !e.altKey && key === 'o') return prevent(e, toggleToc);
   if (e.key === 'F5' && !ctrl && !e.altKey) return prevent(e, () => state.doc && reloadFromDisk());
   if (ctrl && !e.shiftKey && !e.altKey) {
     if (key === 's') return prevent(e, save);
@@ -1333,6 +1739,8 @@ window.addEventListener('keydown', (e) => {
     // メニューと同じく、空のウィンドウでは何もしない
     if (key === 'n') return prevent(e, () => state.doc && api.newWindow());
     if (key === ',') return prevent(e, openSettings);
+    if (key === 'g') return prevent(e, openGoto);
+    if (key === 'd') return prevent(e, showChanges);
     if (key === '1') return prevent(e, () => setMode('view'));
     if (key === '2') return prevent(e, () => setMode('edit'));
     if (key === '3') return prevent(e, () => setMode('split'));
@@ -1349,6 +1757,7 @@ window.addEventListener('keydown', (e) => {
   }
   if (e.key === 'F3' && state.doc) return prevent(e, () => (state.search.open ? moveMatch(e.shiftKey ? -1 : 1) : openSearch()));
   if (e.key === 'Escape' && state.search.open) return prevent(e, closeSearch);
+  if (e.key === 'F1' && !ctrl && !e.altKey) return prevent(e, () => shortcutsHelp.open());
 });
 
 function prevent(e, fn) {
@@ -1393,6 +1802,10 @@ async function openLicenses() {
 
 const MENU_COMMANDS = {
   licenses: openLicenses,
+  shortcuts: () => shortcutsHelp.open(),
+  'font-settings': () => fontDialog.open(appSettings),
+  goto: openGoto,
+  'show-changes': showChanges,
   'syntax-help': () => syntaxHelp.open(paletteVars),
   'save-as': saveAs,
   settings: openSettings,
@@ -1420,13 +1833,121 @@ api.onEmpty(() => {
 });
 api.onExternalChanged(({ missing, dirty, unreadable }) => {
   if (unreadable) {
-    showBanner(`このファイルは外部で変更されましたが、読み込めませんでした（${unreadable}）。表示しているのは変更前の内容です。`);
+    showExternalNotice(
+      `このファイルは外部で変更されましたが、読み込めませんでした（${unreadable}）。表示しているのは変更前の内容です。`,
+      { closeTitle: '閉じる（変更前の内容の表示を続けます）' },
+      '外部で変更（読み込めません）',
+    );
+  } else if (missing) {
+    showExternalNotice(
+      'このファイルは外部で削除（または移動）されました。保存すると同じ場所に作り直します。',
+      { reload: false, closeTitle: '閉じる（このまま編集を続けられます。保存すると同じ場所に作り直します）' },
+      '外部で削除',
+    );
+  } else if (dirty) {
+    showExternalNotice(
+      'このファイルは外部で変更されました。再読み込みすると編集中の内容は失われます。',
+      { diff: true, closeTitle: '閉じる（外部の変更は取り込まずに編集を続けます）' },
+      '外部で変更あり',
+    );
+  } else {
+    showExternalNotice(
+      'このファイルは外部で変更されました（自動再読み込みはオフです）。',
+      { diff: true, closeTitle: '閉じる（外部の変更は読み込まずに、今の表示のままにします）' },
+      '外部で変更あり',
+    );
+  }
+});
+
+// 外部での変更の差分: 外部の変更（読み込んだ内容 → 今のファイル）と、編集中なら自分の編集を並べて見せる
+async function showExternalDiff() {
+  if (!state.doc) return;
+  const disk = await api.readDiskText();
+  if (!disk?.ok) {
+    showBanner(`ファイルを読み込めませんでした（${disk?.error ?? '不明なエラー'}）。`, { reload: false });
     return;
   }
-  if (missing) showBanner('このファイルは外部で削除（または移動）されました。保存すると同じ場所に作り直します。', { reload: false });
-  else if (dirty) showBanner('このファイルは外部で変更されました。再読み込みすると編集中の内容は失われます。');
-  else showBanner('このファイルは外部で変更されました（自動再読み込みはオフです）。');
-});
+  const sections = [{ heading: '外部の変更（読み込んだ内容 → 今のファイル）', oldText: state.savedText, newText: disk.text }];
+  if (state.dirty) sections.push({ heading: 'あなたの編集（読み込んだ内容 → 編集中の内容）', oldText: state.savedText, newText: editor.value });
+  const answer = await diffDialog.open({
+    title: '外部での変更',
+    note: state.dirty
+      ? '編集中の内容はまだ保存されていません。外部の変更を読み込むと、編集中の内容は失われます。編集を残すときは「閉じる」を押し、必要な外部の変更を手で取り込んでから保存してください。'
+      : '',
+    sections,
+    buttons: state.dirty
+      ? [
+          { label: '外部の変更を読み込む（編集を破棄）', value: 'reload', danger: true },
+          { label: '閉じる', value: 'close', primary: true },
+        ]
+      : [
+          { label: '外部の変更を読み込む', value: 'reload', primary: true },
+          { label: '閉じる', value: 'close' },
+        ],
+  });
+  if (answer === 'reload') reloadFromDisk(true);
+}
+
+// 変更点の確認（編集 > 変更点を確認・Ctrl+D・ステータスバーの「● 未保存」）
+async function showChanges() {
+  if (!state.doc) return;
+  const answer = await diffDialog.open({
+    title: '変更点の確認',
+    note: `「${state.doc.name}」の保存済みの内容と、編集中の内容の差分です。`,
+    sections: [{ heading: '保存済みの内容 → 編集中の内容', oldText: state.savedText, newText: editor.value }],
+    buttons: state.dirty
+      ? [
+          { label: '保存', value: 'save', primary: true },
+          { label: '閉じる', value: 'close' },
+        ]
+      : [{ label: '閉じる', value: 'close', primary: true }],
+  });
+  if (answer === 'save') save({ skipDiffConfirm: true });
+}
+
+const diffDialog = createDiffDialog({ dialog: $('#diff-dialog') });
+
+// 指定行へ移動（Ctrl+G・ステータスバーの「行・列」）
+const gotoDialog = createGotoDialog({ dialog: $('#goto-dialog'), onGo: gotoLine });
+function openGoto() {
+  if (!state.doc) return;
+  const current = state.mode === 'view' ? Math.floor(previewTopLine()) + 1 : editor.caretPosition().line;
+  gotoDialog.open(editor.lineCount(), current);
+}
+
+/** @param {number} n 行番号（1 始まり） */
+function gotoLine(n) {
+  const line = n - 1;
+  if (state.mode === 'view') {
+    scrollPreviewToLine(line);
+    // その行を含むブロックを一瞬強調する
+    let block = null;
+    for (const node of article.querySelectorAll('[data-line]')) {
+      if (Number(node.dataset.line) <= line) block = node;
+      else break;
+    }
+    if (block) flash(block);
+    return;
+  }
+  const pos = editor.offsetOfLine(line);
+  els.textarea.focus({ preventScroll: true });
+  els.textarea.setSelectionRange(pos, pos);
+  const node = editor.lineNodes[line];
+  if (node) {
+    // 行を画面の上から 1/3 あたりに置く
+    els.textarea.scrollTop = Math.max(0, node.offsetTop - els.textarea.clientHeight / 3);
+    editor.syncMirrorScroll();
+  }
+  if (state.mode === 'split') syncScroll('editor');
+  updateCaretStatus();
+}
+
+// ヘルプ > キーボード ショートカット（F1）
+const shortcutsHelp = createShortcutsHelp({ dialog: $('#shortcuts-dialog') });
+
+els.stDirty.addEventListener('click', showChanges);
+els.stPos.addEventListener('click', openGoto);
+els.stLinks.addEventListener('click', nextBrokenLink);
 
 els.body.dataset.mode = state.mode;
 updateTitle();

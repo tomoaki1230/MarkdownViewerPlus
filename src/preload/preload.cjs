@@ -61,6 +61,10 @@ contextBridge.exposeInMainWorld('mvp', {
   openPaths: (paths) => ipcRenderer.invoke('doc:open-paths', Array.from(paths, String)),
   openLink: (url) => ipcRenderer.invoke('doc:open-link', String(url)),
   openExternal: (url) => ipcRenderer.send('app:open-external', String(url)),
+  // 外部で変更されたファイルの今の内容（差分表示用）
+  readDiskText: () => ipcRenderer.invoke('doc:read-disk'),
+  // リンク切れの検出: file: の URL が指すファイルがあるか（真偽値の配列）
+  checkFiles: (urls) => ipcRenderer.invoke('doc:check-files', Array.from(urls, String)),
   // ドロップされたファイルの実パス（Electron 32 以降は File.path が無いため）
   pathForFile: (file) => webUtils.getPathForFile(file),
 });
