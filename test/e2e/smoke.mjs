@@ -1712,6 +1712,111 @@ try {
     await main.evaluate(`(() => { for (const c of globalThis.__mvp.visibleContexts()) if (c.doc && [${JSON.stringify(clean)}, ${JSON.stringify(dirty)}].includes(c.doc.path)) c.win.destroy(); return true; })()`);
   });
 
+  await step('狭いウィンドウ: 目次は本文に重ねて出し（本文の幅を削らない）、見出しの選択・Esc・外側のクリックで閉じる。広くすると元の状態に戻る', async () => {
+    const size = (w, h) => main.evaluate(`(() => { ${fwin}.win.setContentSize(${w}, ${h}); return true; })()`);
+    await fq(`localStorage.setItem('mvp.toc', '1'), true`);
+    await fkey('3', 'ctrlKey: true');
+    await size(700, 500);
+    await waitFor(() => fq(`document.body.classList.contains('toc-overlay')`), { label: '重ねる表示' });
+    assert.equal(await fq(`document.querySelector('#toc').hidden`), true, '狭くなったら閉じる');
+    await fq(`document.querySelector('#btn-toc').click(), true`);
+    const open = await fq(`(() => {
+      const r = (s) => document.querySelector(s).getBoundingClientRect();
+      return { open: !document.querySelector('#toc').hidden, wsLeft: r('#workspace').left, tocBottom: r('#toc').bottom, statusTop: r('#status').top, saved: localStorage.getItem('mvp.toc') };
+    })()`);
+    assert.ok(open.open && open.wsLeft === 0 && open.tocBottom <= open.statusTop + 0.5 && open.saved === '1', JSON.stringify(open));
+    await fkey('Escape');
+    assert.equal(await fq(`document.querySelector('#toc').hidden`), true, 'Esc で閉じる');
+    await fq(`document.querySelector('#btn-toc').click(), true`);
+    await fq(`document.querySelector('#toc-list .toc-item').click(), true`);
+    assert.equal(await fq(`document.querySelector('#toc').hidden`), true, '見出しを選ぶと閉じる');
+    await fq(`document.querySelector('#btn-toc').click(), true`);
+    await fq(`document.querySelector('#editor-pane').dispatchEvent(new PointerEvent('pointerdown', { bubbles: true })), true`);
+    assert.equal(await fq(`document.querySelector('#toc').hidden`), true, '外側のクリックで閉じる');
+    assert.equal(await fq(`localStorage.getItem('mvp.toc')`), '1', '重ねた目次の開閉は覚えない');
+    // 表示モードは 2 ペインより狭くなってから重ねる
+    await fkey('1', 'ctrlKey: true');
+    assert.equal(await fq(`document.body.classList.contains('toc-overlay')`), false);
+    assert.equal(await fq(`document.querySelector('#toc').hidden`), false, '並べる表示に戻ると、覚えている状態（開く）');
+    await size(1200, 800);
+    await fkey('3', 'ctrlKey: true');
+    assert.deepEqual(await fq(`[document.body.classList.contains('toc-overlay'), document.querySelector('#toc').hidden]`), [false, false]);
+    await fq(`localStorage.setItem('mvp.toc', '0'), true`);
+    await fq(`document.querySelector('#toc-close').click(), true`);
+    await fkey('1', 'ctrlKey: true');
+  });
+
+  await step('ダイアログを開いている間は、キー操作・メニューのコマンドで後ろの画面が変わらず、ダイアログも重ならない', async () => {
+    await fkey('g', 'ctrlKey: true');
+    await waitFor(() => fq(`document.querySelector('#goto-dialog').open`), { label: '指定行へ移動' });
+    const before = await fq(`JSON.stringify([document.body.dataset.mode, document.querySelector('#toc').hidden, document.querySelector('#search').hidden])`);
+    for (const [k, o] of [['d', 'ctrlKey: true'], ['3', 'ctrlKey: true'], ['f', 'ctrlKey: true'], ['O', 'ctrlKey: true, shiftKey: true'], ['F1', '']]) await fkey(k, o);
+    for (const cmd of ['show-changes', 'theme-picker', 'find', 'settings', 'shortcuts']) await main.evaluate(`${fwin}.win.webContents.send('menu:command', ${JSON.stringify(cmd)}), true`);
+    await sleep(300);
+    assert.deepEqual(await fq(`[...document.querySelectorAll('dialog[open]')].map((d) => d.id)`), ['goto-dialog']);
+    assert.equal(await fq(`JSON.stringify([document.body.dataset.mode, document.querySelector('#toc').hidden, document.querySelector('#search').hidden])`), before);
+    await fq(`document.querySelector('#goto-dialog').close(), true`);
+    // 閉じた後は普通に使える
+    await fkey('d', 'ctrlKey: true');
+    await waitFor(() => fq(`document.querySelector('#diff-dialog').open`), { label: '変更点' });
+    await fq(`document.querySelector('#diff-dialog').close(), true`);
+  });
+
+  await step('狭いウィンドウのステータスバー: 項目が収まらないときは文字数・モードなどから隠し、未保存・リンク切れの表示は切れない', async () => {
+    const size = (w, h) => main.evaluate(`(() => { ${fwin}.win.setContentSize(${w}, ${h}); return true; })()`);
+    const text = await fq(`document.querySelector('#ed-input').value`);
+    await fset(`${text}\n[無い](no-such-file.md)\n`);
+    await waitFor(() => fq(`!document.querySelector('#st-links').hidden && !document.querySelector('#st-dirty').hidden`), { label: '未保存・リンク切れ' });
+    const measure = () => fq(`(() => {
+      const st = document.querySelector('#status').getBoundingClientRect();
+      const shown = [...document.querySelectorAll('#status .st-item')].filter((e) => !e.hidden && e.offsetParent && e.textContent);
+      return { clipped: shown.filter((e) => e.getBoundingClientRect().right > st.right + 0.5).map((e) => e.id), shown: shown.map((e) => e.id), squeezed: [...document.querySelectorAll('#status .st-squeezed')].map((e) => e.id) };
+    })()`);
+    await size(500, 500);
+    await sleep(300);
+    const narrow = await measure();
+    assert.ok(narrow.clipped.length === 0 && narrow.shown.includes('st-dirty') && narrow.shown.includes('st-links') && narrow.squeezed.includes('st-chars'), JSON.stringify(narrow));
+    await size(1200, 800);
+    await sleep(300);
+    assert.deepEqual((await measure()).squeezed, [], '広くすると全部出る');
+    await fset(text);
+  });
+
+  await step('他の文書の見出しへのリンク（other.md#見出し）: 開いた文書でその見出しへ移動し、既に開いていても移動する。壊れた %（#100%）のリンクでも例外にならない', async () => {
+    const other = path.join(work, 'anchor-other.md');
+    const from = path.join(work, 'anchor-from.md');
+    fs.writeFileSync(other, `# 他\n\n${'本文\n\n'.repeat(120)}## 節その一\n\n${'本文\n\n'.repeat(120)}## 節その二\n\n${'本文\n\n'.repeat(60)}`);
+    fs.writeFileSync(from, '# 元\n\n[一](anchor-other.md#節その一) [二](anchor-other.md#節その二) [壊れ](#100%)\n\n## 100%\n');
+    await main.evaluate(`globalThis.__mvp.openFile(${JSON.stringify(from)}).then(() => true)`);
+    const w = (f) => `globalThis.__mvp.visibleContexts().find((x) => x.doc?.path === ${JSON.stringify(f)})`;
+    const run = (f, js) => main.evaluate(`${w(f)}.win.webContents.executeJavaScript(${JSON.stringify(`(async () => (${js}))()`)})`);
+    const clickLink = (text) => run(from, `[...document.querySelector('#preview').shadowRoot.querySelectorAll('a')].find((a) => a.textContent === ${JSON.stringify(text)}).click(), true`);
+    // 移動先の見出しが表示の先頭付近にあるか
+    const headingAtTop = (text) => run(other, `(() => {
+      const pv = document.querySelector('#preview');
+      const h = [...pv.shadowRoot.querySelectorAll('h2')].find((x) => x.textContent === ${JSON.stringify(text)});
+      return Math.abs(h.getBoundingClientRect().top - pv.getBoundingClientRect().top) < 80;
+    })()`);
+    await waitFor(() => run(from, `!!document.querySelector('#preview').shadowRoot.querySelector('h1')`), { label: '元の文書' });
+    await clickLink('一');
+    await waitFor(() => main.evaluate(`Boolean(${w(other)})`), { label: '開く' });
+    await waitFor(() => headingAtTop('節その一'), { label: '節その一へ移動' });
+    // 既に開いている文書へのリンク: 前面に出して、その見出しへ移動する
+    await clickLink('二');
+    await waitFor(() => headingAtTop('節その二'), { label: '節その二へ移動' });
+    // 編集モードでは、その見出しの行へキャレットを置く
+    await run(other, `window.dispatchEvent(new KeyboardEvent('keydown', { key: '2', ctrlKey: true })), true`);
+    await clickLink('一');
+    const line = (await fs.promises.readFile(other, 'utf8')).split('\n').indexOf('## 節その一') + 1;
+    await waitFor(async () => (await run(other, `window.__mvpEditor.caretPosition().line`)) === line, { label: '編集側の行' });
+    // 壊れた % のリンク: クリックの処理で例外が出ない
+    await run(from, `(window.__linkErrors = [], window.addEventListener('error', (e) => window.__linkErrors.push(e.message)), true)`);
+    await clickLink('壊れ');
+    await sleep(200);
+    assert.deepEqual(await run(from, `window.__linkErrors`), []);
+    for (const f of [from, other]) await main.evaluate(`${w(f)}.win.destroy(), true`);
+  });
+
   await step('キーボード ショートカットの一覧（F1・ヘルプ メニュー）と、新しいメニュー項目', async () => {
     await fkey('F1');
     const list = await waitFor(() => fq(`document.querySelector('#shortcuts-dialog').open && [...document.querySelectorAll('#shortcuts-dialog kbd')].map((k) => k.textContent)`), { label: '一覧' });

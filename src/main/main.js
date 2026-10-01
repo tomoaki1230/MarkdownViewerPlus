@@ -1151,14 +1151,21 @@ function registerIpc() {
   ipcMain.handle('doc:open-link', async (e, url) => {
     const ctx = ctxFromEvent(e);
     let target;
+    let hash = '';
     try {
-      target = fileURLToPath(new URL(url));
+      const parsed = new URL(url);
+      hash = parsed.hash.slice(1);
+      parsed.hash = '';
+      target = fileURLToPath(parsed);
     } catch {
       return;
     }
     const ext = path.extname(target).slice(1).toLowerCase();
-    if (MARKDOWN_EXTS.includes(ext)) await openFile(target, ctx?.doc ? null : ctx);
-    else if (fs.existsSync(target)) shell.showItemInFolder(target);
+    if (MARKDOWN_EXTS.includes(ext)) {
+      const opened = await openFile(target, ctx?.doc ? null : ctx);
+      // other.md#見出し: 開いた（既に開いていれば前面に出した）文書で、その見出しへ移動する
+      if (opened && hash && !opened.win.isDestroyed()) opened.win.webContents.send('doc:goto-anchor', hash);
+    } else if (fs.existsSync(target)) shell.showItemInFolder(target);
   });
   ipcMain.on('app:open-external', (_e, url) => openExternalSafe(url));
   // 外部で変更されたファイルの今の内容（差分表示用。読むだけで、開いている文書には反映しない）

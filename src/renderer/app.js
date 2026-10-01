@@ -191,8 +191,7 @@ article.addEventListener('click', (e) => {
   // 空のリンク（[文字]() など）は何もしない（文書のフォルダを開いてしまわないように）
   if (href === '') return;
   if (href.startsWith('#')) {
-    const id = decodeURIComponent(href.slice(1));
-    const target = shadow.getElementById(id) ?? article.querySelector(`[name="${CSS.escape(id)}"]`);
+    const target = findAnchor(href.slice(1));
     if (target) els.preview.scrollTop += target.getBoundingClientRect().top - els.preview.getBoundingClientRect().top - 8;
     return;
   }
@@ -202,8 +201,33 @@ article.addEventListener('click', (e) => {
   } catch {
     return;
   }
-  if (url.protocol === 'file:') api.openLink(url.href.split('#')[0]);
+  // 他の文書の見出し（other.md#見出し）は、開いた後にその見出しへ移動する（# 以降も main へ渡す）
+  if (url.protocol === 'file:') api.openLink(url.href);
   else api.openExternal(url.href);
+});
+
+/**
+ * #の後ろの文字（URL エンコードされていてもよい）から、プレビューの移動先の要素を探す。
+ * 「#100%」のような正しくないエンコードは、そのままの文字で探す（decodeURIComponent は例外を投げるため）
+ */
+function findAnchor(raw) {
+  let id = raw;
+  try {
+    id = decodeURIComponent(raw);
+  } catch {
+    // そのまま使う
+  }
+  if (!id) return null;
+  return shadow.getElementById(id) ?? article.querySelector(`[name="${CSS.escape(id)}"]`);
+}
+
+// 他の文書のリンクから開いた（または前面に出した）文書で、指定の見出しへ移動する。
+// 編集モードでもプレビューを作って、移動先の要素のソース行を求める
+api.onGotoAnchor((raw) => {
+  if (!state.doc) return;
+  renderPreview();
+  const line = Number(findAnchor(raw)?.closest('[data-line]')?.dataset.line);
+  if (Number.isFinite(line)) gotoHeading(line);
 });
 
 // 表示の文字をダブルクリック →「ここを直す」: 表示モードなら 2 ペインに切り替え、編集側で同じ文字を選択する
@@ -343,7 +367,24 @@ function readTocOpen() {
   }
 }
 
+// 狭いウィンドウでは、目次を本文の横に並べず本文の上に重ねて出す（本文・2 ペインの幅を削らない）。
+// 重ねて出した目次の開閉は覚えない。広くなったら、覚えている開閉の状態に戻す
+const TOC_OVERLAY_WIDTH = { split: 900, other: 640 };
+
+function tocIsOverlay() {
+  return els.body.classList.contains('toc-overlay');
+}
+
+function updateTocLayout() {
+  const limit = state.mode === 'split' ? TOC_OVERLAY_WIDTH.split : TOC_OVERLAY_WIDTH.other;
+  const narrow = window.innerWidth < limit;
+  if (narrow === tocIsOverlay()) return;
+  els.body.classList.toggle('toc-overlay', narrow);
+  setTocOpen(narrow ? false : readTocOpen(), { save: false });
+}
+
 function setTocOpen(open, { save = true } = {}) {
+  if (tocIsOverlay()) save = false;
   // 本文の幅が変わって折り返しが変わっても、読んでいる位置（ソース行）を保つ
   const line = state.doc ? (state.mode === 'view' ? previewTopLine() : editor.topLine()) : null;
   els.toc.hidden = !open;
@@ -424,15 +465,68 @@ function gotoHeading(line) {
   clearTimeout(tocCurrentTimer);
   tocCurrentTimer = null;
   tocPanel.setCurrentLine(line);
+  // 重ねて出しているときは、移動したら閉じて本文を見せる
+  if (tocIsOverlay()) setTocOpen(false);
 }
 
 els.btnToc.addEventListener('click', toggleToc);
 els.tocClose.addEventListener('click', () => setTocOpen(false));
 // 他のウィンドウで開閉したら合わせる
 window.addEventListener('storage', (e) => {
-  if (e.key === 'mvp.toc') setTocOpen(e.newValue === '1', { save: false });
+  if (e.key === 'mvp.toc' && !tocIsOverlay()) setTocOpen(e.newValue === '1', { save: false });
 });
+// 重ねて出した目次は、目次の外をクリックしたら閉じる
+document.addEventListener('pointerdown', (e) => {
+  if (!tocIsOverlay() || els.toc.hidden) return;
+  if (els.toc.contains(e.target) || els.btnToc.contains(e.target)) return;
+  setTocOpen(false);
+});
+window.addEventListener('resize', updateTocLayout);
 setTocOpen(readTocOpen(), { save: false });
+updateTocLayout();
+
+// ---------------------------------------------------------------------------
+// ステータスバー: 狭くて項目が収まらないときは、優先度の低い項目から隠す
+// （未保存・リンク切れ・外部で変更あり・読み取り専用の知らせは隠さない）
+// ---------------------------------------------------------------------------
+
+const statusBar = document.querySelector('#status');
+// 隠す順（先頭ほど優先度が低い）
+const STATUS_DROP_ORDER = ['#st-chars', '#st-mode', '#st-search', '#st-eol', '#st-encoding', '#st-pos'].map((q) =>
+  document.querySelector(q),
+);
+// ファイルのパスは省略されて縮むので、ここまで縮んだら他の項目を隠す
+const STATUS_PATH_MIN = 80;
+let statusFitFrame = 0;
+
+function statusOverflows() {
+  if (statusBar.scrollWidth > statusBar.clientWidth + 1) return true;
+  return els.stPath.textContent !== '' && els.stPath.clientWidth < STATUS_PATH_MIN;
+}
+
+function fitStatus() {
+  statusFitFrame = 0;
+  for (const el of STATUS_DROP_ORDER) el.classList.remove('st-squeezed');
+  for (const el of STATUS_DROP_ORDER) {
+    if (!statusOverflows()) break;
+    el.classList.add('st-squeezed');
+  }
+}
+
+// 変更が続いても 1 回にまとめて測る（requestAnimationFrame は隠れたウィンドウで止まるので setTimeout）
+function scheduleFitStatus() {
+  if (!statusFitFrame) statusFitFrame = setTimeout(fitStatus, 0);
+}
+
+window.addEventListener('resize', scheduleFitStatus);
+// 項目の文字や表示・非表示が変わったら測り直す（自分で付ける st-squeezed の変化は見ない）
+new MutationObserver(scheduleFitStatus).observe(statusBar, {
+  subtree: true,
+  childList: true,
+  characterData: true,
+  attributes: true,
+  attributeFilter: ['hidden'],
+});
 
 // 他のソフトでファイルを作った・消したかもしれないので、ウィンドウに戻ったら調べ直す
 window.addEventListener('focus', () => {
@@ -602,6 +696,7 @@ function setMode(mode, { keepScroll = true } = {}) {
   for (const b of els.modeButtons) b.setAttribute('aria-pressed', String(b.dataset.mode === mode));
   updatePreviewOnlyButtons(mode);
   updateLinkStatus();
+  updateTocLayout();
   scheduleTocCurrent();
 
   if (mode !== 'edit') renderPreview();
@@ -1722,10 +1817,24 @@ api.onNotice(({ message }) => showToast(message));
 // キーボードショートカット
 // ---------------------------------------------------------------------------
 
+// 画面（ダイアログ）が開いているか。開いている間は、後ろの画面を変えるキー操作・メニューのコマンドを受け付けない
+// （受け付けると、後ろでモードや検索が切り替わったり、画面が重なったりする）
+function modalOpen() {
+  return document.querySelector('dialog[open]') !== null;
+}
+// ダイアログを開いていても使える操作（ウィンドウを閉じる・終了）
+const ALLOWED_WITH_MODAL = new Set(['close']);
+
 window.addEventListener('keydown', (e) => {
   if (e.isComposing) return;
   const ctrl = e.ctrlKey || e.metaKey;
   const key = e.key.toLowerCase();
+  // ダイアログを開いている間は、そのダイアログのキー操作（Esc で閉じる・Enter で決定など）だけにする
+  if (modalOpen()) {
+    if (ctrl && !e.shiftKey && !e.altKey && key === 'w') return prevent(e, () => api.closeWindow());
+    if (ctrl && !e.shiftKey && !e.altKey && key === 'q') return prevent(e, () => api.quit());
+    return;
+  }
   const editing = state.doc && state.mode !== 'view';
 
   if (ctrl && e.shiftKey && !e.altKey && key === 's') return prevent(e, saveAs);
@@ -1756,6 +1865,7 @@ window.addEventListener('keydown', (e) => {
     }
   }
   if (e.key === 'F3' && state.doc) return prevent(e, () => (state.search.open ? moveMatch(e.shiftKey ? -1 : 1) : openSearch()));
+  if (e.key === 'Escape' && tocIsOverlay() && !els.toc.hidden) return prevent(e, () => setTocOpen(false));
   if (e.key === 'Escape' && state.search.open) return prevent(e, closeSearch);
   if (e.key === 'F1' && !ctrl && !e.altKey) return prevent(e, () => shortcutsHelp.open());
 });
@@ -1820,7 +1930,11 @@ const MENU_COMMANDS = {
   'find-next': () => (state.search.open ? moveMatch(1) : openSearch()),
   'find-prev': () => (state.search.open ? moveMatch(-1) : openSearch()),
 };
-api.onMenuCommand((cmd) => MENU_COMMANDS[cmd]?.());
+api.onMenuCommand((cmd) => {
+  // ダイアログを開いている間は、閉じる以外のメニューのコマンドを受け付けない（後ろの画面を変えない・画面を重ねない）
+  if (modalOpen() && !ALLOWED_WITH_MODAL.has(cmd)) return;
+  MENU_COMMANDS[cmd]?.();
+});
 api.onEmpty(() => {
   setDocControlsEnabled(false);
   els.stPath.textContent = 'ファイルを開いていません';

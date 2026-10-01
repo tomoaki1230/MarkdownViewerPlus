@@ -16,6 +16,7 @@ contextBridge.exposeInMainWorld('mvp', {
   // main → renderer
   onLoad: (cb) => subscribe('doc:load', cb),
   onReload: (cb) => subscribe('doc:reload', cb),
+  onGotoAnchor: (cb) => subscribe('doc:goto-anchor', cb),
   onEmpty: (cb) => subscribe('doc:empty', cb),
   onExternalChanged: (cb) => subscribe('doc:external-changed', cb),
   onMenuCommand: (cb) => subscribe('menu:command', cb),

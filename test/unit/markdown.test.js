@@ -229,3 +229,25 @@ test('脚注の id は文書中の HTML からは名乗れない（mvp-fn の id
   assert.equal(d.querySelector('#fn-1').textContent, 'ふつう');
   assert.equal(d.querySelector('[data-mvp-own]'), null, '印は表示に残さない');
 });
+
+test('アラート・脚注の拡張: 段落の数が多い大きな文書でも、変換の時間が文書の長さに比例する程度で済む', () => {
+  // 以前は段落ごとに文書の残り全体を探しており、1MB（段落 2 万）で約 5 秒かかっていた（2 乗で増える）
+  const blocks = [];
+  for (let i = 0; i < 10000; i++) blocks.push(`**太字** ${i}`, '', `本文 ${i} `.repeat(8), '');
+  const src = `${blocks.join('\n')}\n\n> [!NOTE]\n> 最後のアラート\n\n最後[^1]\n\n[^1]: 最後の脚注\n`;
+  const t = performance.now();
+  md.headings(src);
+  const html = md.render(src);
+  const ms = performance.now() - t;
+  assert.ok(ms < 3000, `${Math.round(ms)}ms`);
+  // 段落の外（文書の最後）にあるアラート・脚注も、これまでどおり変換される
+  const d = dom(html);
+  assert.ok(d.querySelector('.markdown-alert-note'));
+  assert.ok(d.querySelector('section.footnotes li'));
+});
+
+test('アラート・脚注の拡張: 段落のすぐ下の行（空行なし）のアラート・脚注の定義は、段落を区切って変換される', () => {
+  const d = dom(md.render('段落\n> [!WARNING]\n> 警告\n\n本文[^1]\n[^1]: 定義\n'));
+  assert.ok(d.querySelector('.markdown-alert-warning'));
+  assert.equal(d.querySelector('section.footnotes li')?.textContent.replace('↩', '').trim(), '定義');
+});

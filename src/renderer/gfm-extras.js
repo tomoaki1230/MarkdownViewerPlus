@@ -21,6 +21,16 @@ function alertIcon(type) {
   return `<svg class="octicon" viewBox="0 0 16 16" width="16" height="16" aria-hidden="true">${ALERT_TYPES[type].icon}</svg>`;
 }
 
+// ブロックの拡張の start は、marked が段落の区切り位置を探すために段落ごとに呼ぶ。
+// 文書の残り全体を探すと、段落の数 × 文書の長さ（2 乗）の時間がかかり大きな文書で固まるため、
+// 今の段落の終わり（次の空行）までだけを探す。段落はそこで終わるので、それより先の位置は結果に影響しない
+const BLANK_LINE = /\n[ \t]*(?:\n|$)/;
+function startInParagraph(src, pattern) {
+  const blank = BLANK_LINE.exec(src);
+  const m = pattern.exec(blank ? src.slice(0, blank.index) : src);
+  return m ? m.index : undefined;
+}
+
 export function alertExtension() {
   return {
     extensions: [
@@ -28,8 +38,7 @@ export function alertExtension() {
         name: 'alert',
         level: 'block',
         start(src) {
-          const m = /^ {0,3}> ?\[!/m.exec(src);
-          return m ? m.index : undefined;
+          return startInParagraph(src, /^ {0,3}> ?\[!/m);
         },
         tokenizer(src) {
           const m = ALERT_BLOCK.exec(src);
@@ -90,8 +99,7 @@ export function footnoteExtension(getState, own = '') {
         name: 'footnoteDef',
         level: 'block',
         start(src) {
-          const m = /^ {0,3}\[\^[^\]\s]+\]:/m.exec(src);
-          return m ? m.index : undefined;
+          return startInParagraph(src, /^ {0,3}\[\^[^\]\s]+\]:/m);
         },
         tokenizer(src) {
           const m = FOOTNOTE_DEF.exec(src);

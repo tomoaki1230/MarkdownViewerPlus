@@ -925,6 +925,10 @@ body.drag-over #workspace {
   padding-left: 14px;
   border-left: 1px solid var(--border);
 }
+/* 狭いときに隠した項目（app.js の fitStatus） */
+#status .st-squeezed {
+  display: none;
+}
 #st-path + #st-message {
   border-left: none !important;
 }
@@ -1556,6 +1560,22 @@ body.drag-over #workspace {
 #toc[hidden],
 body.is-empty #toc {
   display: none;
+}
+/* 狭いウィンドウ: 本文の横に並べず、本文の上に重ねて出す（本文の幅を削らない） */
+body.toc-overlay {
+  position: relative;
+}
+body.toc-overlay #toc {
+  position: absolute;
+  /* 終わりの線も指定する（絶対配置では auto がコンテナの端を指し、ステータスバーに重なるため） */
+  grid-row: 3 / 4;
+  grid-column: 1 / -1;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  z-index: 30;
+  width: min(260px, calc(100vw - 48px));
+  box-shadow: 4px 0 16px rgb(0 0 0 / 0.25);
 }
 .toc-head {
   display: flex;
