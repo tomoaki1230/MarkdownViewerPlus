@@ -557,7 +557,7 @@ window.__mvpGetText = () => editor.value;
 function onEditorInput() {
   updateDirty();
   scheduleToc();
-  if (state.search.open) runSearch({ keepPosition: true });
+  if (state.search.open) scheduleSearchAfterInput();
   if (state.mode === 'split') schedulePreview();
   else state.renderedText = null;
   updateCaretStatus();
@@ -1023,6 +1023,7 @@ function openSearch() {
 }
 
 function closeSearch() {
+  flushSearch();
   const wasEditor = searchTarget() === 'editor';
   state.search.open = false;
   els.search.hidden = true;
@@ -1043,15 +1044,23 @@ function closeSearch() {
   }
 }
 
+// 本文の入力のたびに検索し直すと、大きな文書でヒットが多いときに入力が重くなる（472KB・約 2,000 件で 1 文字約 0.6 秒）。
+// 入力が止まってから検索し直す。それまでの間は、ヒットの位置を入力の分だけずらして色を付けておく（editor.shiftMatches）
+const SEARCH_AFTER_INPUT_MS = 200;
+let searchInputTimer = null;
+
 /**
  * 検索を実行してハイライトを更新する
  * @param {{keepPosition: boolean}} opts true: 現在のヒット付近を保つ（本文編集・再描画時） / false: キャレット（表示モードは表示位置）以降の最初のヒットへ
  */
 function runSearch({ keepPosition }) {
+  clearTimeout(searchInputTimer);
+  searchInputTimer = null;
   const s = state.search;
   const target = searchTarget();
   const text = target === 'preview' ? previewIndex().text : editor.value;
-  const prev = s.matches[s.current];
+  // 編集側は、入力でずらした後の位置（editor.shiftMatches）を基準にする
+  const prev = target === 'editor' && editor.matches.length > 0 ? editor.matches[editor.currentMatch] : s.matches[s.current];
   const { matches, error, truncated } = findMatches(text, els.searchInput.value, searchOptions());
   s.matches = matches;
   s.error = error;
@@ -1094,7 +1103,19 @@ function updateSearchCount() {
   els.stSearch.textContent = `検索: ${els.searchCount.textContent}`;
 }
 
+
+function scheduleSearchAfterInput() {
+  clearTimeout(searchInputTimer);
+  searchInputTimer = setTimeout(() => runSearch({ keepPosition: true }), SEARCH_AFTER_INPUT_MS);
+}
+
+// 検索し直しを待っている間にヒットを使う操作（次 / 前へ・検索を閉じる）の前に、検索し直しを済ませる
+function flushSearch() {
+  if (searchInputTimer && state.search.open) runSearch({ keepPosition: true });
+}
+
 function moveMatch(delta) {
+  flushSearch();
   const s = state.search;
   if (s.matches.length === 0) return;
   s.current = (s.current + delta + s.matches.length) % s.matches.length;

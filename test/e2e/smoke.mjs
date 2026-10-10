@@ -1817,6 +1817,49 @@ try {
     for (const f of [from, other]) await main.evaluate(`${w(f)}.win.destroy(), true`);
   });
 
+  await step('検索中に本文を入力: すぐには検索し直さず、ヒットの位置を入力の分だけずらして色を付ける。止まると検索し直し、次へ・閉じるも正しいヒットを使う', async () => {
+    const f = path.join(work, 'search-typing.md');
+    const text = 'abc 一 abc\n二 abc\n\n三 abc\n';
+    fs.writeFileSync(f, text);
+    await main.evaluate(`globalThis.__mvp.openFile(${JSON.stringify(f)}).then(() => true)`);
+    const w = `globalThis.__mvp.visibleContexts().find((x) => x.doc?.path === ${JSON.stringify(f)})`;
+    const run = (js) => main.evaluate(`${w}.win.webContents.executeJavaScript(${JSON.stringify(`(async () => (${js}))()`)})`);
+    await waitFor(() => run(`!!document.querySelector('#preview').shadowRoot.querySelector('h1') || document.querySelector('#ed-input').value.length > 0`), { label: '開く' });
+    await run(`window.dispatchEvent(new KeyboardEvent('keydown', { key: '2', ctrlKey: true })), true`);
+    await run(`(() => { window.dispatchEvent(new KeyboardEvent('keydown', { key: 'f', ctrlKey: true })); const s = document.querySelector('#search-input'); s.value = 'abc'; s.dispatchEvent(new Event('input')); return true; })()`);
+    const snap = () => run(`(() => {
+      const ed = window.__mvpEditor, ta = document.querySelector('#ed-input');
+      return { texts: ed.matches.map((m) => ta.value.slice(m.start, m.end)), hit: [...document.querySelectorAll('#ed-mirror .hit')].map((e) => e.textContent).join(''), cur: ed.matches[ed.currentMatch]?.start ?? -1, count: document.querySelector('#search-count').textContent, mirror: document.querySelector('#ed-mirror').textContent === ta.value };
+    })()`);
+    const type = (pos, s) => run(`(() => { const ta = document.querySelector('#ed-input'); ta.focus(); ta.setSelectionRange(${pos}, ${pos}); document.execCommand('insertText', false, ${JSON.stringify(s)}); return true; })()`);
+    assert.equal((await snap()).texts.length, 4);
+    // 先頭に入力: 直後はまだ検索し直さないが、色は正しい文字に付く
+    await run(`(window.__mvpEditor.currentMatch, true)`);
+    const cur0 = (await snap()).cur;
+    await type(0, 'xx');
+    let s = await snap();
+    assert.deepEqual(s.texts, ['abc', 'abc', 'abc', 'abc']);
+    assert.equal(s.hit, 'abcabcabcabc');
+    assert.equal(s.cur, cur0 + 2, '現在のヒットは同じ箇所');
+    assert.ok(s.mirror);
+    // ヒットの中を書き換えると、そのヒットはすぐ外れ、止まると件数が減る
+    await type(4, 'Z');
+    s = await snap();
+    assert.deepEqual(s.texts, ['abc', 'abc', 'abc']);
+    await waitFor(async () => (await snap()).count.endsWith('/ 3 件'), { label: '検索し直し' });
+    // 入力の直後に次へ: 正しいヒットを選ぶ
+    await type(0, 'abc ');
+    await run(`document.querySelector('#search-input').dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true })), true`);
+    assert.equal(await run(`(() => { const ta = document.querySelector('#ed-input'); return ta.value.slice(ta.selectionStart, ta.selectionEnd); })()`), 'abc');
+    assert.ok((await snap()).count.endsWith('/ 4 件'));
+    // 入力の直後に閉じる: 選ばれる文字は検索語
+    await type(0, 'q');
+    await run(`window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' })), true`);
+    assert.equal(await run(`(() => { const ta = document.querySelector('#ed-input'); return ta.value.slice(ta.selectionStart, ta.selectionEnd); })()`), 'abc');
+    assert.equal(await run(`window.__mvpEditor.matches.length`), 0);
+    await main.evaluate(`${w}.win.destroy(), true`);
+  });
+
   await step('キーボード ショートカットの一覧（F1・ヘルプ メニュー）と、新しいメニュー項目', async () => {
     await fkey('F1');
     const list = await waitFor(() => fq(`document.querySelector('#shortcuts-dialog').open && [...document.querySelectorAll('#shortcuts-dialog kbd')].map((k) => k.textContent)`), { label: '一覧' });

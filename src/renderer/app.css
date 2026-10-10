@@ -408,6 +408,10 @@ body[data-mode='split'] #workspace {
   /* 区切りの中心が --split の位置に来るようにする（50% で左右が同じ幅）。
      編集側は検索バーが見切れない幅（--editor-min）より狭くならない */
   grid-template-columns: max(var(--editor-min), calc(var(--split) - 3.5px)) 7px 1fr;
+  /* 行の高さを決めておく。決めないと（auto）、編集側が 1 文字変わるたびにプレビュー全体の高さを測り直し、
+     大きな文書の 2 ペインで入力が重くなる（472KB で 1 文字 約 175ms → 約 70ms）。
+     編集・表示モードでは効果が無く、わずかに遅くなるため 2 ペインだけに付ける */
+  grid-template-rows: minmax(0, 1fr);
 }
 #editor-pane,
 #preview-pane {

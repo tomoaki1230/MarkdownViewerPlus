@@ -36,6 +36,7 @@ export class MirrorEditor {
     this.stale = true;
 
     textarea.addEventListener('input', () => {
+      this.shiftMatches();
       this.refresh();
       this.onInput();
     });
@@ -53,6 +54,8 @@ export class MirrorEditor {
 
   /** 内容を丸ごと差し替える（ファイル読み込み時）。取り消し履歴は引き継がない */
   setValue(text) {
+    this.matches = [];
+    this.currentMatch = -1;
     this.textarea.value = text;
     this.textarea.setSelectionRange(0, 0);
     this.textarea.scrollTop = 0;
@@ -94,7 +97,39 @@ export class MirrorEditor {
   setMatches(matches, currentIndex) {
     this.matches = matches;
     this.currentMatch = currentIndex;
+    this.matchesText = this.textarea.value;
     this.refresh();
+  }
+
+  /**
+   * 入力で文字の位置がずれた分だけ、検索ヒットの位置をずらす（検索し直すまでの間も、色が正しい文字に付くように）。
+   * 書き換えた範囲にかかるヒットは外す。前後の一致しない区間を求めて、その前は据え置き、後ろはずらす
+   */
+  shiftMatches() {
+    const prev = this.matchesText;
+    const next = this.textarea.value;
+    this.matchesText = next;
+    if (this.matches.length === 0 || prev === undefined || prev === next) return;
+    const max = Math.min(prev.length, next.length);
+    let head = 0;
+    while (head < max && prev.charCodeAt(head) === next.charCodeAt(head)) head++;
+    let tail = 0;
+    while (tail < max - head && prev.charCodeAt(prev.length - 1 - tail) === next.charCodeAt(next.length - 1 - tail)) tail++;
+    const oldEnd = prev.length - tail;
+    const delta = next.length - prev.length;
+    const current = this.matches[this.currentMatch];
+    const kept = [];
+    let currentIndex = -1;
+    for (const m of this.matches) {
+      let moved = null;
+      if (m.end <= head) moved = m;
+      else if (m.start >= oldEnd) moved = { ...m, start: m.start + delta, end: m.end + delta };
+      if (!moved) continue;
+      if (m === current) currentIndex = kept.length;
+      kept.push(moved);
+    }
+    this.matches = kept;
+    this.currentMatch = currentIndex;
   }
 
   /**
