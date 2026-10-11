@@ -31,8 +31,8 @@
     "start": "npm run build:dev && node scripts/run-electron.mjs",
     "test": "node --test \"test/unit/*.test.js\"",
     "test:e2e": "npm run build && node test/e2e/smoke.mjs",
-    "dist:win": "npm run build && node scripts/check-win-build.mjs && electron-builder --win",
-    "dist:win:zip": "npm run build && electron-builder --win zip",
+    "dist:win": "npm run build && node scripts/check-win-build.mjs && electron-builder --win && node scripts/check-sac.mjs",
+    "dist:win:zip": "npm run build && electron-builder --win zip && node scripts/check-sac.mjs --app-only",
     "dist:dir": "npm run build && electron-builder --dir",
     "setup:wsl-libs": "bash scripts/setup-wsl-libs.sh"
   },
