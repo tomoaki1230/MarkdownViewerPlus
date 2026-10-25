@@ -1025,8 +1025,8 @@ try {
     assert.equal(narrow.noPartial, true, '途中で切れたボタンが無い');
     assert.ok(narrow.shown < narrow.total, `狭いときは左側の一部が隠れる: ${narrow.shown}/${narrow.total}`);
     await setWidth(1100);
-    await sleep(300);
-    const wide = await check();
+    // 大きさの変更が画面に反映されるまで待つ（決まった時間だけ待つと、PC の負荷が高いときに間に合わない）
+    const wide = await waitFor(async () => { const c = await check(); return c.shown === c.total ? c : false; }, { label: '広いときの並び', timeout: 5000 }).catch(() => check());
     assert.equal(wide.shown, wide.total, '広いときはすべて見える');
   });
 
@@ -1366,21 +1366,118 @@ try {
     await fq(`window.mvp.setSetting('confirmDiffOnSave', false), true`);
   });
 
-  await step('表示の文字をダブルクリック: 2 ペインに切り替わり、編集側で同じ文字（同じ段落の）が選択される', async () => {
+  // 表示の文字を選ぶ（「二つ目の段落」の「誤記」）。選択が変わると「✎ 直す」ボタンが出る
+  const selectInPreview = (startsWith, word, len = word.length) => fq(`(() => {
+    const root = document.querySelector('#preview').shadowRoot;
+    const p = [...root.querySelectorAll('p')].find((x) => x.textContent.startsWith(${JSON.stringify(startsWith)}));
+    const tn = [...p.childNodes].find((n) => n.nodeType === 3);
+    const i = tn.data.indexOf(${JSON.stringify(word)});
+    document.getSelection().setBaseAndExtent(tn, i, tn, i + ${len});
+    return true;
+  })()`);
+  const editorSel = () => fq(`(() => { const ta = document.querySelector('#ed-input'); return { mode: document.body.dataset.mode, selected: ta.value.slice(ta.selectionStart, ta.selectionEnd), start: ta.selectionStart, focus: document.activeElement === ta }; })()`);
+  const expectedStart = featText.indexOf('二つ目の段落。誤記') + '二つ目の段落。'.length;
+
+  await step('表示の文字のダブルクリック: 単語を選ぶだけで、2 ペインには切り替わらない', async () => {
     await fkey('1', 'ctrlKey: true');
     await sleep(200);
-    const r = await fq(`(() => {
-      const root = document.querySelector('#preview').shadowRoot;
-      const p = [...root.querySelectorAll('p')].find((x) => x.textContent.startsWith('二つ目'));
-      const tn = [...p.childNodes].find((n) => n.nodeType === 3);
-      const i = tn.data.indexOf('誤記');
-      document.getSelection().setBaseAndExtent(tn, i, tn, i + 2);
-      p.dispatchEvent(new MouseEvent('dblclick', { bubbles: true, composed: true }));
-      const ta = document.querySelector('#ed-input');
-      return { mode: document.body.dataset.mode, selected: ta.value.slice(ta.selectionStart, ta.selectionEnd), start: ta.selectionStart, focus: document.activeElement === ta };
+    await selectInPreview('二つ目', '誤記');
+    await fq(`(() => { const p = [...document.querySelector('#preview').shadowRoot.querySelectorAll('p')].find((x) => x.textContent.startsWith('二つ目')); p.dispatchEvent(new MouseEvent('dblclick', { bubbles: true, composed: true })); return true; })()`);
+    await sleep(200);
+    assert.equal(await fq(`document.body.dataset.mode`), 'view');
+    assert.equal(await fq(`document.getSelection().toString()`), '誤記', '選択は残る');
+  });
+
+  await step('「✎ 直す」ボタン: 表示の文字を選ぶと選択のそばに出て、押すと 2 ペインで同じ文字を選ぶ。Esc・編集モードでは隠れる', async () => {
+    await fkey('1', 'ctrlKey: true');
+    await selectInPreview('二つ目', '誤記');
+    await waitFor(() => fq(`!document.querySelector('#edit-here').hidden`), { label: 'ボタン' });
+    const pos = await fq(`(() => {
+      const b = document.querySelector('#edit-here').getBoundingClientRect();
+      const r = document.getSelection().getRangeAt(0).getClientRects()[0];
+      const pv = document.querySelector('#preview').getBoundingClientRect();
+      return { near: Math.abs(b.bottom - r.top) < 14 || Math.abs(b.top - r.bottom) < 14, inside: b.left >= pv.left && b.right <= pv.right && b.top >= pv.top && b.bottom <= pv.bottom, noOverlap: b.bottom <= r.top + 0.5 || b.top >= r.bottom - 0.5 };
     })()`);
-    const expectedStart = featText.indexOf('二つ目の段落。誤記') + '二つ目の段落。'.length;
-    assert.deepEqual(r, { mode: 'split', selected: '誤記', start: expectedStart, focus: true });
+    assert.deepEqual(pos, { near: true, inside: true, noOverlap: true });
+    // Esc で隠れる
+    await fkey('Escape');
+    assert.equal(await fq(`document.querySelector('#edit-here').hidden`), true);
+    // もう一度選んで押す（同じ範囲を選び直しても選択の変化にならないので、一度外す）
+    await fq(`(document.getSelection().removeAllRanges(), true)`);
+    await sleep(50);
+    await selectInPreview('二つ目', '誤記');
+    await waitFor(() => fq(`!document.querySelector('#edit-here').hidden`), { label: 'ボタン（2 回目）' });
+    await fq(`document.querySelector('#edit-here').click(), true`);
+    assert.deepEqual(await editorSel(), { mode: 'split', selected: '誤記', start: expectedStart, focus: true });
+    assert.equal(await fq(`document.querySelector('#edit-here').hidden`), true, '押したら隠れる');
+    // 2 ペインでも、表示側で選ぶと出る。編集モードにすると隠れる
+    await selectInPreview('最初の段落', '誤記');
+    await waitFor(() => fq(`!document.querySelector('#edit-here').hidden`), { label: '2 ペインのボタン' });
+    await fkey('2', 'ctrlKey: true');
+    assert.equal(await fq(`document.querySelector('#edit-here').hidden`), true);
+  });
+
+  await step('Enter / F2: 表示の文字を選んで押すと、2 ペインで同じ文字を選ぶ', async () => {
+    for (const k of ['Enter', 'F2']) {
+      await fkey('1', 'ctrlKey: true');
+      await selectInPreview('二つ目', '誤記');
+      await fkey(k);
+      assert.deepEqual(await editorSel(), { mode: 'split', selected: '誤記', start: expectedStart, focus: true }, k);
+    }
+    // 選択が無いときの Enter は何もしない
+    await fkey('1', 'ctrlKey: true');
+    await fq(`(document.getSelection().removeAllRanges(), true)`);
+    await fkey('Enter');
+    assert.equal(await fq(`document.body.dataset.mode`), 'view');
+  });
+
+  await step('右クリック: 選択があれば「コピー」「ここを直す」、無ければ「ここを直す」（その段落の先頭へ）「すべて選択」', async () => {
+    await main.evaluate(`(() => {
+      globalThis.__popups = [];
+      globalThis.__origPopup = globalThis.__mvp.Menu.prototype.popup;
+      globalThis.__mvp.Menu.prototype.popup = function () { globalThis.__popups.push(this); };
+      return true;
+    })()`);
+    const rightClick = (startsWith) => fq(`(() => { const p = [...document.querySelector('#preview').shadowRoot.querySelectorAll('p')].find((x) => x.textContent.startsWith(${JSON.stringify(startsWith)})); p.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, composed: true, cancelable: true, button: 2 })); return true; })()`);
+    const lastMenu = () => waitFor(() => main.evaluate(`globalThis.__popups.length > 0 && globalThis.__popups.at(-1).items.map((i) => i.label).filter(Boolean)`), { label: 'メニュー' });
+    const clickItem = (label) => main.evaluate(`(globalThis.__popups.at(-1).items.find((i) => i.label === ${JSON.stringify(label)}).click(), true)`);
+    // 選択あり
+    await fkey('1', 'ctrlKey: true');
+    await selectInPreview('二つ目', '誤記');
+    await rightClick('二つ目');
+    assert.deepEqual(await lastMenu(), ['コピー', 'ここを直す']);
+    await clickItem('ここを直す');
+    await waitFor(async () => (await editorSel()).selected === '誤記', { label: '直す' });
+    assert.deepEqual(await editorSel(), { mode: 'split', selected: '誤記', start: expectedStart, focus: true });
+    // 選択なし: 右クリックした段落の先頭へ
+    await fkey('1', 'ctrlKey: true');
+    await fq(`(document.getSelection().removeAllRanges(), true)`);
+    await main.evaluate(`(globalThis.__popups.length = 0, true)`);
+    await rightClick('最初の段落');
+    assert.deepEqual(await lastMenu(), ['ここを直す', 'すべて選択']);
+    await clickItem('ここを直す');
+    const line2 = featText.indexOf('最初の段落');
+    await waitFor(async () => (await editorSel()).start === line2, { label: '段落の先頭' });
+    assert.equal((await editorSel()).mode, 'split');
+    // 編集モードでは出ない（表示側が見えない）。リンクの上ではブラウザで開くも出る
+    await main.evaluate(`globalThis.__mvp.Menu.prototype.popup = globalThis.__origPopup, true`);
+  });
+
+  await step('「ここを直す」: 複数の行にまたがる選択は、最初の行の文字を選ぶ', async () => {
+    await fkey('1', 'ctrlKey: true');
+    await fq(`(() => {
+      const root = document.querySelector('#preview').shadowRoot;
+      const ps = [...root.querySelectorAll('p')];
+      const a = ps.find((x) => x.textContent.startsWith('最初の段落')).firstChild;
+      const b = ps.find((x) => x.textContent.startsWith('二つ目')).firstChild;
+      document.getSelection().setBaseAndExtent(a, a.data.indexOf('誤記'), b, 3);
+      return true;
+    })()`);
+    await fkey('F2');
+    const r = await editorSel();
+    assert.equal(r.mode, 'split');
+    assert.equal(r.selected, '誤記があります。');
+    assert.equal(r.start, featText.indexOf('誤記があります。'));
   });
 
   await step('リンク切れ: 無いファイル・無い見出し・無い画像に印が付き、ステータスバーから順に移動できる', async () => {
@@ -1740,6 +1837,8 @@ try {
     assert.equal(await fq(`document.querySelector('#toc').hidden`), false, '並べる表示に戻ると、覚えている状態（開く）');
     await size(1200, 800);
     await fkey('3', 'ctrlKey: true');
+    // 大きさの変更（resize）が届くまで待つ（PC の負荷が高いと遅れる）
+    await waitFor(() => fq(`!document.body.classList.contains('toc-overlay')`), { label: '並べる表示', timeout: 5000 }).catch(() => {});
     assert.deepEqual(await fq(`[document.body.classList.contains('toc-overlay'), document.querySelector('#toc').hidden]`), [false, false]);
     await fq(`localStorage.setItem('mvp.toc', '0'), true`);
     await fq(`document.querySelector('#toc-close').click(), true`);

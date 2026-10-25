@@ -929,6 +929,43 @@ body.drag-over #workspace {
   padding-left: 14px;
   border-left: 1px solid var(--border);
 }
+/* 表示の文字を選んだときに出す「✎ 直す」ボタン（#preview-pane の中に絶対配置） */
+#edit-here {
+  position: absolute;
+  z-index: 4;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 26px;
+  padding: 0 10px 0 8px;
+  border: 1px solid var(--accent);
+  border-radius: 13px;
+  background: var(--accent);
+  color: var(--accent-fg);
+  font-size: 12px;
+  line-height: 1;
+  white-space: nowrap;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2);
+  cursor: pointer;
+}
+#edit-here[hidden] {
+  display: none;
+}
+#edit-here:hover {
+  filter: brightness(1.1);
+}
+#edit-here:focus-visible {
+  outline: 2px solid var(--fg);
+  outline-offset: 2px;
+}
+#edit-here svg {
+  width: 14px;
+  height: 14px;
+  stroke: currentColor;
+  stroke-width: 1.4;
+  stroke-linejoin: round;
+}
+
 /* 狭いときに隠した項目（app.js の fitStatus） */
 #status .st-squeezed {
   display: none;

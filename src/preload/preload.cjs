@@ -55,6 +55,8 @@ contextBridge.exposeInMainWorld('mvp', {
   saveAs: (text) => ipcRenderer.invoke('doc:save-as', String(text)),
   // 表示幅の選択メニューを出す
   widthMenu: () => ipcRenderer.send('ui:width-menu'),
+  // プレビューの右クリックのメニュー（選択の有無・「ここを直す」が使えるか・リンク先）
+  previewContextMenu: (info) => ipcRenderer.send('ui:preview-context-menu', info),
   // confirmed: 編集中の変更を破棄してよいことを確認済み（通知バナーの「再読み込み」など）
   reloadFromDisk: (confirmed = false) => ipcRenderer.invoke('doc:reload', { confirmed: Boolean(confirmed) }),
   openDialog: () => ipcRenderer.invoke('doc:open-dialog'),

@@ -230,25 +230,61 @@ api.onGotoAnchor((raw) => {
   if (Number.isFinite(line)) gotoHeading(line);
 });
 
-// 表示の文字をダブルクリック →「ここを直す」: 表示モードなら 2 ペインに切り替え、編集側で同じ文字を選択する
-// （ダブルクリックで選ばれた語を、そのブロックのソース行の範囲から探す。見つからなければブロックの先頭行へ）
-article.addEventListener('dblclick', (e) => {
-  if (!state.doc || e.target.closest('a[href], input, button, summary, select, textarea')) return;
-  const block = e.target.closest('[data-line]');
-  if (!block) return;
-  const word = selectedWordIn(block);
-  if (state.mode === 'view') setMode('split');
-  revealSourceOf(block, word);
-});
+// 表示の文字を選んで「ここを直す」: 表示モードなら 2 ペインに切り替え、編集側で同じ文字を選択する。
+// ダブルクリックは普通の単語の選択に使う（以前はダブルクリックで切り替えていたが、単語を選んでコピーしにくかった）。
+// 呼び出し方は 3 つ: 選択のそばに出る「✎ 直す」ボタン / 右クリックの「ここを直す」 / Enter・F2 キー。
+// （選んだ語を、そのブロックのソース行の範囲から探す。見つからなければブロックの先頭行へ）
 
-/** ダブルクリックで選ばれた語と、それがブロックの中で何番目に出てくるか */
-function selectedWordIn(block) {
+/** プレビューの中の選択（無い・プレビューの外なら null） */
+function previewSelection() {
   const sel = shadow.getSelection?.() ?? document.getSelection();
-  if (!sel || sel.rangeCount === 0) return null;
-  const text = sel.toString().trim();
-  if (!text || text.length > 200 || text.includes('\n')) return null;
+  if (!sel || sel.rangeCount === 0 || sel.isCollapsed) return null;
   const range = sel.getRangeAt(0);
+  if (!article.contains(range.startContainer)) return null;
+  if (!sel.toString().trim()) return null;
+  return { sel, range };
+}
+
+/** 選択の始まりがあるブロック（data-line の付いた要素） */
+function blockOfNode(node) {
+  const el = node?.nodeType === Node.ELEMENT_NODE ? node : node?.parentElement;
+  return el?.closest('[data-line]') ?? null;
+}
+
+/** 「ここを直す」が使える状態か（文書があり、表示側が見えている） */
+function canEditHere() {
+  return Boolean(state.doc) && state.mode !== 'edit' && !modalOpen();
+}
+
+/**
+ * 「ここを直す」: block を省くと、今の選択の始まりのブロックを使う
+ * @param {Element} [block] 右クリックした所のブロック（選択が無いとき）
+ */
+function editHere(block) {
+  if (!canEditHere()) return;
+  const picked = previewSelection();
+  const target = picked ? blockOfNode(picked.range.startContainer) : block;
+  if (!target || !article.contains(target)) return;
+  const word = picked ? selectedWordIn(target) : null;
+  hideEditHereButton();
+  if (state.mode === 'view') setMode('split');
+  revealSourceOf(target, word);
+}
+
+/** 選んだ語（複数行なら最初の行）と、それがブロックの中で何番目に出てくるか */
+function selectedWordIn(block) {
+  const picked = previewSelection();
+  if (!picked) return null;
+  const { range } = picked;
   if (!block.contains(range.startContainer)) return null;
+  // 複数の行・ブロックにまたがる選択は、最初の行の部分で探す
+  const first = picked.sel
+    .toString()
+    .split('\n')
+    .map((l) => l.trim())
+    .find(Boolean);
+  if (!first) return null;
+  const text = first.slice(0, 200);
   const before = document.createRange();
   before.setStart(block, 0);
   before.setEnd(range.startContainer, range.startOffset);
@@ -257,6 +293,93 @@ function selectedWordIn(block) {
   for (let i = head.indexOf(text); i >= 0; i = head.indexOf(text, i + text.length)) nth++;
   return { text, nth };
 }
+
+// 選択のそばの「✎ 直す」ボタン。ドラッグ中は出さず、離してから出す。スクロールしたら付いて動き、見えなくなったら隠す
+const editHereBtn = document.querySelector('#edit-here');
+let editHereSelecting = false;
+let editHereTimer = null;
+
+function hideEditHereButton() {
+  clearTimeout(editHereTimer);
+  editHereTimer = null;
+  editHereBtn.hidden = true;
+}
+
+function updateEditHereButton() {
+  editHereTimer = null;
+  const picked = canEditHere() && !editHereSelecting ? previewSelection() : null;
+  if (!picked) {
+    editHereBtn.hidden = true;
+    return;
+  }
+  const pane = els.preview.getBoundingClientRect();
+  const rects = [...picked.range.getClientRects()].filter((r) => r.width > 0 || r.height > 0);
+  const first = rects[0] ?? picked.range.getBoundingClientRect();
+  // 選択の始まりが表示の外なら出さない
+  if (first.bottom < pane.top || first.top > pane.bottom) {
+    editHereBtn.hidden = true;
+    return;
+  }
+  editHereBtn.hidden = false;
+  const host = els.previewPane.getBoundingClientRect();
+  const w = editHereBtn.offsetWidth;
+  const h = editHereBtn.offsetHeight;
+  const gap = 6;
+  // 選択の始まりの行の上に出す。上に場所が無ければ下に出す。左右は表示の中に収める
+  let top = first.top - h - gap;
+  if (top < pane.top + 2) top = first.bottom + gap;
+  const scrollbar = els.preview.offsetWidth - els.preview.clientWidth;
+  const left = Math.min(Math.max(first.left, pane.left + 4), pane.right - scrollbar - w - 4);
+  editHereBtn.style.left = `${Math.round(left - host.left)}px`;
+  editHereBtn.style.top = `${Math.round(top - host.top)}px`;
+}
+
+function scheduleEditHereButton(delay = 120) {
+  clearTimeout(editHereTimer);
+  editHereTimer = setTimeout(updateEditHereButton, delay);
+}
+
+editHereBtn.addEventListener('mousedown', (e) => e.preventDefault()); // 押しても選択を失わない
+editHereBtn.addEventListener('click', () => editHere());
+els.preview.addEventListener('pointerdown', (e) => {
+  if (e.button !== 0) return;
+  editHereSelecting = true;
+  hideEditHereButton();
+});
+window.addEventListener('pointerup', () => {
+  if (!editHereSelecting) return;
+  editHereSelecting = false;
+  scheduleEditHereButton();
+});
+document.addEventListener('selectionchange', () => {
+  if (editHereSelecting) return;
+  if (!previewSelection()) hideEditHereButton();
+  else scheduleEditHereButton();
+});
+els.preview.addEventListener('scroll', () => {
+  if (!editHereBtn.hidden) updateEditHereButton();
+});
+window.addEventListener('resize', () => {
+  if (!editHereBtn.hidden) updateEditHereButton();
+});
+
+// 右クリック: プレビューの中では、選択の有無・「ここを直す」が使えるかを添えて main にメニューを出してもらう
+let contextBlock = null;
+article.addEventListener('contextmenu', (e) => {
+  e.preventDefault();
+  const picked = previewSelection();
+  contextBlock = picked ? blockOfNode(picked.range.startContainer) : blockOfNode(e.target);
+  const a = e.target.closest('a[href]');
+  let link = null;
+  if (a) {
+    try {
+      link = new URL(a.getAttribute('href').trim(), state.doc?.baseUrl ?? undefined).href;
+    } catch {
+      link = null;
+    }
+  }
+  api.previewContextMenu({ selection: Boolean(picked), editHere: canEditHere() && contextBlock !== null, link });
+});
 
 /** ブロックに対応するソースの場所へキャレットを移し、選ばれた語があればそれを選択する */
 function revealSourceOf(block, word) {
@@ -696,6 +819,9 @@ function setMode(mode, { keepScroll = true } = {}) {
   for (const b of els.modeButtons) b.setAttribute('aria-pressed', String(b.dataset.mode === mode));
   updatePreviewOnlyButtons(mode);
   updateLinkStatus();
+  // 「✎ 直す」ボタン: 編集モードでは隠し、2 ペインでは表示の幅が変わるので位置を合わせ直す
+  if (mode === 'edit') hideEditHereButton();
+  else scheduleEditHereButton(0);
   updateTocLayout();
   scheduleTocCurrent();
 
@@ -1888,7 +2014,13 @@ window.addEventListener('keydown', (e) => {
   if (e.key === 'F3' && state.doc) return prevent(e, () => (state.search.open ? moveMatch(e.shiftKey ? -1 : 1) : openSearch()));
   if (e.key === 'Escape' && tocIsOverlay() && !els.toc.hidden) return prevent(e, () => setTocOpen(false));
   if (e.key === 'Escape' && state.search.open) return prevent(e, closeSearch);
+  if (e.key === 'Escape' && !editHereBtn.hidden) return prevent(e, hideEditHereButton);
   if (e.key === 'F1' && !ctrl && !e.altKey) return prevent(e, () => shortcutsHelp.open());
+  // 表示の文字を選んで Enter / F2 →「ここを直す」（入力欄・ボタン・リンクにフォーカスがあるときは、そちらの操作を優先）
+  if ((e.key === 'Enter' || e.key === 'F2') && !ctrl && !e.altKey && !e.shiftKey && canEditHere() && previewSelection()) {
+    const focused = shadow.activeElement ?? document.activeElement;
+    if (e.key === 'F2' || !focused?.closest?.('a[href], button, input, textarea, select, summary')) return prevent(e, () => editHere());
+  }
 });
 
 function prevent(e, fn) {
@@ -1937,6 +2069,7 @@ const MENU_COMMANDS = {
   'font-settings': () => fontDialog.open(appSettings),
   goto: openGoto,
   'show-changes': showChanges,
+  'edit-here': () => editHere(contextBlock),
   'syntax-help': () => syntaxHelp.open(paletteVars),
   'save-as': saveAs,
   settings: openSettings,

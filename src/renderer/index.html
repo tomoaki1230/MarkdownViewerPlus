@@ -175,6 +175,11 @@
       <section id="preview-pane">
         <div id="preview" tabindex="0"></div>
         <div id="pv-ruler" class="hit-ruler" aria-hidden="true" hidden></div>
+        <!-- 表示の文字を選んだときに、そのそばに出す「ここを直す」ボタン（app.js の updateEditHereButton が位置を決める） -->
+        <button id="edit-here" type="button" title="選んだ文字を編集側で直す (Enter / F2)" hidden>
+          <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M11.5 2.5l2 2L6 12H4v-2z" /><path d="M10 4l2 2" /></svg>
+          直す
+        </button>
       </section>
     </main>
 

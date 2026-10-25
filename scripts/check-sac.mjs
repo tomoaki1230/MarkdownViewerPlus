@@ -28,13 +28,24 @@ if ((!appOnly && !fs.existsSync(setup)) || !fs.existsSync(path.join(unpacked, 'M
 const win = (file, args) => execFileSync(file, args, { cwd: '/mnt/c', encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).replace(/\r/g, '');
 const ps = (command) => win('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', `[Console]::OutputEncoding=[Text.Encoding]::UTF8; ${command}`]);
 
-let state;
+// SAC の状態: Defender から読めなければレジストリ（VerifiedAndReputablePolicyState: 0=オフ 1=オン 2=評価）で読む
+let state = '';
 try {
   state = ps('(Get-MpComputerStatus).SmartAppControlState').trim();
 } catch {
-  skip('Windows の状態を読めません');
+  state = '';
 }
-if (state !== 'On') skip(`ホストの SAC が「${state || '不明'}」で、オンではありません`);
+if (!state) {
+  try {
+    const out = win('reg.exe', ['query', 'HKLM\\SYSTEM\\CurrentControlSet\\Control\\CI\\Policy', '/v', 'VerifiedAndReputablePolicyState']);
+    const v = /VerifiedAndReputablePolicyState\s+REG_DWORD\s+0x([0-9a-f]+)/i.exec(out)?.[1];
+    state = { 0: 'Off', 1: 'On', 2: 'Eval' }[v === undefined ? -1 : parseInt(v, 16)] ?? '';
+  } catch {
+    state = '';
+  }
+}
+const STATE_LABEL = { On: 'オン', Off: 'オフ', Eval: '評価' };
+if (state !== 'On') skip(`ホストの SAC が「${STATE_LABEL[state] ?? '不明'}」で、オンではありません`);
 
 // ホストの一時フォルダ（ローカル）へコピーする（WSL のパスのまま起動すると、ネットワーク上の場所として扱われるため）
 const tempWin = win('cmd.exe', ['/c', 'echo %TEMP%']).trim();

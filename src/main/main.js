@@ -960,6 +960,7 @@ function openExternalSafe(url) {
   }
 }
 
+// （プレビューの中の右クリックは、レンダラーが contextmenu の既定の動作を止めて ui:preview-context-menu で頼むので、ここには来ない）
 function showContextMenu(win, params) {
   const items = [];
   if (params.isEditable) {
@@ -1124,6 +1125,22 @@ function registerIpc() {
     return ctx?.doc ? reloadWithConfirm(ctx, { confirmed: Boolean(options?.confirmed) }) : { ok: false };
   });
   // 表示幅の選択メニュー（ツールバーのボタンから）
+  // プレビューの右クリック: コピー / ここを直す / リンクをブラウザで開く（レンダラーが状態を添えて頼む）
+  ipcMain.on('ui:preview-context-menu', (e, info) => {
+    const ctx = ctxFromEvent(e);
+    if (!ctx || ctx.win.isDestroyed()) return;
+    const selection = Boolean(info?.selection);
+    const editHere = Boolean(info?.editHere);
+    const link = typeof info?.link === 'string' ? info.link : null;
+    const items = [];
+    if (selection) items.push({ label: 'コピー', role: 'copy' });
+    if (editHere) items.push({ label: 'ここを直す', accelerator: 'Enter', registerAccelerator: false, click: () => ctx.win.webContents.send('menu:command', 'edit-here') });
+    if (!selection) items.push({ label: 'すべて選択', role: 'selectAll' });
+    if (link && /^(https?|mailto):/i.test(link)) {
+      items.push({ type: 'separator' }, { label: 'リンクをブラウザで開く', click: () => openExternalSafe(link) });
+    }
+    Menu.buildFromTemplate(items).popup({ window: ctx.win });
+  });
   ipcMain.on('ui:width-menu', (e) => {
     const ctx = ctxFromEvent(e);
     if (!ctx) return;

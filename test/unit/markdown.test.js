@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import createDOMPurify from 'dompurify';
 import { JSDOM } from 'jsdom';
+import { Marked } from 'marked';
 import { CHUNK_CHARS, CHUNK_LINES, createMarkdownRenderer } from '../../src/renderer/markdown.js';
 
 const { window } = new JSDOM('');
@@ -231,15 +232,18 @@ test('脚注の id は文書中の HTML からは名乗れない（mvp-fn の id
 });
 
 test('アラート・脚注の拡張: 段落の数が多い大きな文書でも、変換の時間が文書の長さに比例する程度で済む', () => {
-  // 以前は段落ごとに文書の残り全体を探しており、1MB（段落 2 万）で約 5 秒かかっていた（2 乗で増える）
+  // 以前は段落ごとに文書の残り全体を探しており、1MB（段落 2 万）で約 5 秒かかっていた（2 乗で増える）。
+  // 時間は PC の速さ・負荷で変わるので、絶対時間ではなく、拡張の無い marked での字句解析との比で確かめる
+  // （修正前は約 70 倍、修正後は約 1.5 倍）
   const blocks = [];
   for (let i = 0; i < 10000; i++) blocks.push(`**太字** ${i}`, '', `本文 ${i} `.repeat(8), '');
   const src = `${blocks.join('\n')}\n\n> [!NOTE]\n> 最後のアラート\n\n最後[^1]\n\n[^1]: 最後の脚注\n`;
-  const t = performance.now();
-  md.headings(src);
+  const plain = new Marked({ gfm: true });
+  const best = (fn) => Math.min(...[0, 1, 2].map(() => { const t = performance.now(); fn(); return performance.now() - t; }));
+  const base = best(() => plain.lexer(src));
+  const ext = best(() => md.headings(src));
+  assert.ok(ext < base * 10, `拡張あり ${Math.round(ext)}ms / 拡張なし ${Math.round(base)}ms`);
   const html = md.render(src);
-  const ms = performance.now() - t;
-  assert.ok(ms < 3000, `${Math.round(ms)}ms`);
   // 段落の外（文書の最後）にあるアラート・脚注も、これまでどおり変換される
   const d = dom(html);
   assert.ok(d.querySelector('.markdown-alert-note'));
