@@ -73,6 +73,11 @@ export const SYNTAX_SECTIONS = [
         source: '本文に脚注を付ける[^1]。\n\n[^1]: 脚注の文章。文書の最後にまとめて表示される',
         note: '番号をクリックすると脚注へ、↩ で本文へ戻る。[^名前] のように名前も使える',
       },
+      {
+        name: '図（Mermaid）',
+        source: '```mermaid\nflowchart LR\n  A[入力] --> B{確認}\n  B -->|OK| C[保存]\n  B -->|NG| A\n```',
+        note: 'フローチャート・シーケンス図・クラス図・ガントチャートなどが描ける。書き方を誤ると、理由と元のコードを表示する',
+      },
     ],
   },
   {
@@ -83,7 +88,7 @@ export const SYNTAX_SECTIONS = [
 
 export const UNSUPPORTED_SYNTAX = [
   '数式（$...$）',
-  'Mermaid・PlantUML の図',
+  'PlantUML の図',
   'Qiita のメッセージ（:::note）',
   'コード内の色の表示（`#f00` の色見本）',
 ];
@@ -199,6 +204,7 @@ export function createSyntaxHelp(opts) {
       for (const code of built.shadow.querySelectorAll('pre code[class*="language-"]')) {
         if (window.hljs && !code.classList.contains('hljs')) window.hljs.highlightElement(code);
       }
+      opts.afterOpen?.(built.shadow);
     },
   };
 }

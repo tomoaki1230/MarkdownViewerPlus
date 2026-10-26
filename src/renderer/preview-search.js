@@ -15,7 +15,8 @@ export function buildTextIndex(root) {
   const walker = doc.createTreeWalker(root, 4 /* NodeFilter.SHOW_TEXT */, {
     acceptNode(node) {
       for (let el = node.parentElement; el && el !== root; el = el.parentElement) {
-        if (SKIP.has(el.tagName)) return 2; // FILTER_REJECT
+        // SVG の要素（図の <style> など）は tagName が小文字なので、大文字にそろえて比べる
+        if (SKIP.has(el.tagName.toUpperCase())) return 2; // FILTER_REJECT
       }
       return 1; // FILTER_ACCEPT
     },

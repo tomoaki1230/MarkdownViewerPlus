@@ -255,3 +255,12 @@ test('アラート・脚注の拡張: 段落のすぐ下の行（空行なし）
   assert.ok(d.querySelector('.markdown-alert-warning'));
   assert.equal(d.querySelector('section.footnotes li')?.textContent.replace('↩', '').trim(), '定義');
 });
+
+test('Mermaid のコードブロックは、図にする前の形（language-mermaid のコード）で出力し、中身はそのまま文字として残る', () => {
+  const d = dom(md.render('```mermaid\nflowchart LR\n  A["<b>太字</b>"] --> B\n```\n'));
+  const code = d.querySelector('pre > code.language-mermaid');
+  assert.ok(code);
+  assert.equal(code.textContent, 'flowchart LR\n  A["<b>太字</b>"] --> B\n');
+  assert.equal(d.querySelector('b'), null, 'HTML として解釈しない');
+  assert.equal(d.querySelector('pre').getAttribute('data-line'), '0');
+});

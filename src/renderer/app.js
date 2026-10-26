@@ -9,6 +9,7 @@ import { findBrokenLinks } from './link-check.js';
 import { createTocPanel } from './toc-panel.js';
 import { previewFontCss, previewLineHeight } from './preview-style.js';
 import { createMarkdownRenderer } from './markdown.js';
+import { createMermaidView, mermaidConfig } from './mermaid-view.js';
 import { buildTextIndex, rangeFor } from './preview-search.js';
 import { findMatches, indexAtOrAfter } from './search.js';
 import { createFontDialog } from './font-dialog.js';
@@ -122,6 +123,19 @@ const shadow = els.preview.attachShadow({ mode: 'open' });
 shadow.innerHTML = '<link rel="stylesheet" href="preview.css"><article class="markdown-body"></article>';
 const article = shadow.querySelector('article');
 
+// Mermaid の図（mermaid-view.js）。図を差し替えると高さが変わるので、スクロールの対応・検索の索引を取り直す
+const mermaidView = createMermaidView({
+  // Mermaid の結果をさらに無害化する（SVG の要素だけを残す。図の装飾の <style> は残す）
+  sanitize: (svg) => DOMPurify.sanitize(svg, { USE_PROFILES: { svg: true, svgFilters: true }, ADD_TAGS: ['style'] }),
+  getConfig: () => mermaidConfig(paletteVars, { dark: colorMedia.matches, fontFamily: getComputedStyle(article).fontFamily }),
+  onChange: (root) => {
+    if (root !== article) return;
+    state.anchors = null;
+    onPreviewDomChanged();
+    if (state.mode === 'split') syncScroll('editor');
+  },
+});
+
 function renderPreview({ force = false } = {}) {
   clearTimeout(state.previewTimer);
   state.previewTimer = null;
@@ -131,6 +145,8 @@ function renderPreview({ force = false } = {}) {
   const html = md.render(text, { baseUrl: state.doc?.baseUrl });
   marks['Markdown 変換・サニタイズ'] ??= Date.now();
   article.innerHTML = html;
+  // Mermaid のコードブロックを図にする（同じ図は覚えている結果ですぐに、新しい図は後から描く）
+  mermaidView.apply(article);
   marks['プレビュー DOM 挿入'] ??= Date.now();
   state.anchors = null;
   highlightCode();
@@ -1377,6 +1393,15 @@ const TOOLS = {
     insertBlock(`\`\`\`\n${body}\n\`\`\`\n`, 4, body.length);
   },
   hr: () => insertBlock('\n---\n', 5, 0),
+  // Mermaid の図のひな形（中の 1 行を選択して、そのまま書き換えられるようにする）。
+  // 文字を選んでいても消さず、選んだ範囲の後ろに入れる
+  mermaid: () => {
+    const ta = els.textarea;
+    ta.setSelectionRange(ta.selectionEnd, ta.selectionEnd);
+    const body = 'A[開始] --> B[終了]';
+    const text = `\`\`\`mermaid\nflowchart LR\n  ${body}\n\`\`\`\n`;
+    insertBlock(text, text.indexOf(body), body.length);
+  },
   table: insertTable,
 };
 
@@ -1762,6 +1787,8 @@ function applyPalette() {
     els.preview.style.setProperty(name, value);
   }
   els.body.dataset.palette = `${dark ? 'dark' : 'light'}:${theme.id}`;
+  // 図の色もテーマに合わせて描き直す
+  if (mermaidView.has(article)) mermaidView.apply(article);
 }
 colorMedia.addEventListener('change', () => {
   themeState = { ...themeState, dark: colorMedia.matches };
@@ -1814,6 +1841,8 @@ function applyAppSettings(next) {
   els.preview.style.setProperty('--pv-font', previewFontCss(s.previewFont));
   els.preview.style.setProperty('--pv-line', previewLineHeight(s.previewLineHeight));
   md.setBreaks(s.breaks);
+  // 図の文字のフォントも合わせて描き直す
+  if (prev.previewFont !== s.previewFont && mermaidView.has(article)) mermaidView.apply(article);
   settingsDialog.update(s);
   fontDialog.update(s);
   // 改行の扱い・表示幅・フォント・行間が変わったら、表示位置（ソース行）を保ったまま描き直す
@@ -2049,6 +2078,8 @@ api.onReload(reloadDocument);
 const syntaxHelp = createSyntaxHelp({
   dialog: document.querySelector('#syntax-dialog'),
   render: (src) => md.render(src),
+  // 見本の Mermaid も図にする
+  afterOpen: (root) => mermaidView.apply(root),
 });
 
 // ヘルプ > サードパーティのライセンス（文章は main がアプリに同梱した一覧から読む）

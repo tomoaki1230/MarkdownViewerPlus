@@ -316,3 +316,32 @@ pre code.hljs {
 .footnotes li p {
   margin: 0 0 4px;
 }
+
+/* Mermaid の図（mermaid-view.js がコードブロックを置き換える） */
+.mermaid-figure {
+  margin: 0 0 16px;
+  overflow-x: auto;
+  text-align: center;
+}
+.mermaid-figure svg {
+  max-width: 100%;
+  height: auto;
+}
+/* 図を描いている間は、元のコードを薄く表示しておく */
+pre.mermaid-pending {
+  opacity: 0.55;
+}
+/* 描けなかったとき: 理由と元のコード */
+.mermaid-failed {
+  text-align: left;
+}
+.mermaid-error {
+  margin: 0 0 6px;
+  padding: 6px 10px;
+  border-left: 3px solid var(--danger, #cf222e);
+  color: var(--pv-fg);
+  background: var(--pv-code-bg);
+  font-size: 0.9em;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}

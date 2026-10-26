@@ -1589,7 +1589,7 @@ try {
   await step('表のボタン: カーソル行の次に 2 列の表のひな形を入れて見出しを選択し、前後の文字の行とは空行で区切る。元に戻せる', async () => {
     await fkey('3', 'ctrlKey: true');
     const tableBtn = await fq(`(() => { const btns = [...document.querySelectorAll('#tools .tools-left button')].map((b) => b.dataset.tool ?? b.dataset.action); return btns.slice(btns.indexOf('codeblock'), btns.indexOf('hr') + 1); })()`);
-    assert.deepEqual(tableBtn, ['codeblock', 'table', 'hr'], 'コードブロックと水平線の間');
+    assert.deepEqual(tableBtn, ['codeblock', 'mermaid', 'table', 'hr'], 'コードブロック・図（1.2.0 で追加）の後、水平線の前');
     const base = await fq(`document.querySelector('#ed-input').value`);
     const run = (text, caret) =>
       fq(`(() => {
@@ -1956,6 +1956,36 @@ try {
     await run(`window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' })), true`);
     assert.equal(await run(`(() => { const ta = document.querySelector('#ed-input'); return ta.value.slice(ta.selectionStart, ta.selectionEnd); })()`), 'abc');
     assert.equal(await run(`window.__mvpEditor.matches.length`), 0);
+    await main.evaluate(`${w}.win.destroy(), true`);
+  });
+
+  await step('Mermaid の図: コードブロックが図になり、書き方の誤りは理由と元のコードを表示し、図の中のスクリプトは動かない。テーマを変えると描き直す', async () => {
+    const f = path.join(work, 'mermaid.md');
+    fs.writeFileSync(f, ['# 図', '', '```mermaid', 'flowchart LR', '  A[入力] --> B[保存]', '```', '', '```mermaid', 'flowchart LR', '  A --> ', '```', '', '```mermaid', 'flowchart LR', '  X["<img src=x onerror=window.__mxss=1>"] --> Y', '  click X call alert("x")', '```', ''].join('\n'));
+    await main.evaluate(`globalThis.__mvp.openFile(${JSON.stringify(f)}).then(() => true)`);
+    const w = `globalThis.__mvp.visibleContexts().find((x) => x.doc?.path === ${JSON.stringify(f)})`;
+    const run = (js) => main.evaluate(`${w}.win.webContents.executeJavaScript(${JSON.stringify(`(async () => (${js}))()`)})`);
+    await waitFor(() => run(`(() => { const r = document.querySelector('#preview').shadowRoot; return r.querySelectorAll('.mermaid-figure').length === 3 && !r.querySelector('.mermaid-pending'); })()`), { label: '図', timeout: 30000 });
+    const s = await run(`(() => {
+      const figs = [...document.querySelector('#preview').shadowRoot.querySelectorAll('.mermaid-figure')];
+      return figs.map((f) => ({ svg: !!f.querySelector('svg'), failed: f.classList.contains('mermaid-failed'), text: f.querySelector('svg')?.textContent.includes('入力') ?? false, code: f.querySelector('pre code')?.textContent ?? null, line: f.dataset.line, script: f.querySelectorAll('script, foreignObject').length }));
+    })()`);
+    assert.deepEqual(s.map((x) => [x.svg, x.failed, x.line]), [[true, false, '2'], [false, true, '7'], [true, false, '12']]);
+    assert.ok(s[0].text, '図の中に文字');
+    assert.equal(s[1].code, 'flowchart LR\n  A --> \n', '誤りのときは元のコード');
+    assert.ok(s.every((x) => x.script === 0));
+    await sleep(300);
+    assert.equal(await run(`window.__mxss ?? null`), null, '図の中のスクリプトは動かない');
+    // テーマを変えると図の色も変わる
+    const fill = () => run(`getComputedStyle(document.querySelector('#preview').shadowRoot.querySelector('.mermaid-figure svg rect')).fill`);
+    const before = await fill();
+    const original = await run(`window.mvp.getTheme().then((t) => t.theme)`);
+    await run(`(window.mvp.setTheme(document.body.dataset.palette.startsWith('dark') ? 'light' : 'dark'), true)`);
+    await waitFor(async () => (await fill()) !== before, { label: '色の変化', timeout: 15000 });
+    await run(`(window.mvp.setTheme(${JSON.stringify(original)}), true)`);
+    await waitFor(async () => (await fill()) === before, { label: '元の色', timeout: 15000 });
+    // Mermaid が作業用に作る一時的な要素は残らない
+    assert.deepEqual(await run(`[...document.body.children].filter((e) => /mermaid/i.test(e.id)).map((e) => e.id)`), []);
     await main.evaluate(`${w}.win.destroy(), true`);
   });
 

@@ -5,8 +5,8 @@
 ## 特長
 
 - 表示 / 編集 / 2 ペイン（編集＋表示）の切り替え
-- GFM、Markdown 内の HTML、`:smile:` などの絵文字、コードの色付けに対応
-- 変更した行の印と変更点（差分）の確認、表示中の文字のダブルクリックでその場所を編集
+- GFM、Markdown 内の HTML、`:smile:` などの絵文字、コードの色付け、Mermaid の図に対応
+- 変更した行の印と変更点（差分）の確認、表示中の文字を選んで「✎ 直す」でその場所を編集
 - リンク切れの検出、指定行へ移動
 - リアルタイム検索、外部で変更されたファイルの自動再読み込み、ライト / ダークのテーマ
 
@@ -32,6 +32,7 @@ Windows 11 の「スマート アプリ コントロール」がオンになっ�
 - [marked](https://marked.js.org/)（Markdown の変換）
 - [DOMPurify](https://github.com/cure53/DOMPurify)（HTML の無害化）
 - [highlight.js](https://highlightjs.org/)（コードの色付け）
+- [Mermaid](https://mermaid.js.org/)（図の表示）
 - [gemoji](https://github.com/wooorm/gemoji)（絵文字）
 - [encoding-japanese](https://github.com/polygonplanet/encoding.js)（文字コードの判定・変換）
 - [esbuild](https://esbuild.github.io/) / [electron-builder](https://www.electron.build/)（ビルド）

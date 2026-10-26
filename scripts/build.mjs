@@ -3,6 +3,7 @@
 //   boot.bundle.js … テーマの色を最初の描画より前に当てる小さなスクリプト（<head> で同期実行）
 //   app.bundle.js  … marked / DOMPurify / 絵文字 / アプリ本体（起動時に読み込む）
 //   hljs.bundle.js … highlight.js（本文を描画した後に遅延ロード）
+//   mermaid.bundle.js … Mermaid（図。図のある文書を開いたときだけ遅延ロード。約 5MB）
 // あわせて、assets/icon.png から複数サイズ入りの dist/icon.ico を作る（Windows のウィンドウ・トレイ・exe のアイコン）
 // assets/file-icon.png からは dist/file-icon.ico を作る（インストーラが関連付けた .md ファイルのアイコン）
 import * as esbuild from 'esbuild';
@@ -76,19 +77,63 @@ const THIRD_PARTY = [
   { name: 'encoding-japanese', license: 'MIT', files: ['LICENSE'] },
 ];
 
-function writeThirdPartyLicenses() {
-  const sections = THIRD_PARTY.map((lib) => {
-    const dir = path.join(root, 'node_modules', lib.name);
+// Mermaid は多くの部品を内部で使うため、手で書くと漏れる。mermaid.bundle.js に実際に入った部品を
+// esbuild の metafile から求め、それぞれの package.json のライセンスと、同梱のライセンス文を載せる
+function bundledPackages(metafile) {
+  const names = new Set();
+  for (const input of Object.keys(metafile.inputs)) {
+    // 入れ子の node_modules（部品の中の部品）は、いちばん内側の部品の名前を使う
+    const all = [...input.replaceAll('\\', '/').matchAll(/node_modules\/((?:@[^/]+\/)?[^/]+)\//g)];
+    if (all.length) names.add(all.map((m) => m[0]).join('').replace(/\/$/, ''));
+  }
+  // もともと一覧に載せている部品（DOMPurify など）は重ねて載せない
+  const listed = new Set(THIRD_PARTY.map((l) => `node_modules/${l.name}`));
+  return [...names].filter((n) => !listed.has(n)).sort();
+}
+
+function licenseFiles(dir) {
+  return fs.readdirSync(dir).filter((f) => /^(licen[cs]e|copying|notice)/i.test(f) && fs.statSync(path.join(dir, f)).isFile());
+}
+
+function autoEntries(paths, note) {
+  return paths.map((rel) => {
+    const dir = path.join(root, rel);
+    const name = rel.replace(/^.*node_modules\//, '');
+    const pkg = JSON.parse(fs.readFileSync(path.join(dir, 'package.json'), 'utf8'));
+    const files = licenseFiles(dir);
+    let license = typeof pkg.license === 'string' ? pkg.license : pkg.license?.type;
+    // package.json に記載が無いときは、ライセンス文から種類を読み取る
+    if (!license && files.length) {
+      const text = fs.readFileSync(path.join(dir, files[0]), 'utf8');
+      license = [[/MIT License|Permission is hereby granted, free of charge/i, 'MIT'], [/ISC License/i, 'ISC'], [/Apache License/i, 'Apache-2.0'], [/BSD/i, 'BSD']].find(([re]) => re.test(text))?.[1];
+      if (license) license += '（ライセンス文より）';
+    }
+    if (!license) throw new Error(`ライセンスが分からない部品があります: ${name}`);
+    const repo = String((typeof pkg.repository === 'string' ? pkg.repository : pkg.repository?.url) ?? pkg.homepage ?? '')
+      .replace(/^git\+/, '')
+      .replace(/\.git$/, '')
+      .replace(/^github:/, 'https://github.com/');
+    // EPL・MPL・LGPL などは、配布するときにソースコードの入手先を示す
+    const source = /^(EPL|MPL|LGPL|CDDL)/i.test(license) && repo ? `ソースコードは ${repo} から入手できます。` : null;
+    return { name, dir, license: `${license}（${note}）`, files, optionalFiles: true, source };
+  });
+}
+
+function writeThirdPartyLicenses(extra = []) {
+  const sections = [...THIRD_PARTY, ...extra].map((lib) => {
+    const dir = lib.dir ?? path.join(root, 'node_modules', lib.name);
     const pkg = JSON.parse(fs.readFileSync(path.join(dir, 'package.json'), 'utf8'));
     const author = typeof pkg.author === 'string' ? pkg.author : pkg.author?.name;
     const repo = typeof pkg.repository === 'string' ? pkg.repository : pkg.repository?.url;
     const texts = lib.files.map((f) => fs.readFileSync(path.join(dir, f), 'utf8').trim());
+    if (texts.length === 0 && lib.optionalFiles) texts.push('（この部品にはライセンス文のファイルが含まれていないため、package.json の記載のライセンスに従います）');
     return [
       '='.repeat(78),
       `${lib.label ?? lib.name} ${pkg.version}`,
       `ライセンス: ${lib.license}`,
       author ? `作者: ${author}` : null,
       pkg.homepage || repo ? `配布元: ${pkg.homepage ?? repo}` : null,
+      lib.source ?? null,
       '='.repeat(78),
       '',
       ...texts,
@@ -113,10 +158,13 @@ const entries = [
   { entryPoints: [path.join(src, 'boot.js')], outfile: path.join(out, 'boot.bundle.js') },
   { entryPoints: [path.join(src, 'app.js')], outfile: path.join(out, 'app.bundle.js'), plugins: [compactEmoji] },
   { entryPoints: [path.join(src, 'hljs-entry.js')], outfile: path.join(out, 'hljs.bundle.js') },
+  { entryPoints: [path.join(src, 'mermaid-entry.js')], outfile: path.join(out, 'mermaid.bundle.js') },
 ];
 
 copyStatic();
-writeThirdPartyLicenses();
+// mermaid.bundle.js に入る部品を求めて、ライセンス一覧に載せる（書き出しはしない）
+const mermaidMeta = await esbuild.build({ ...common, entryPoints: [path.join(src, 'mermaid-entry.js')], write: false, metafile: true, logLevel: 'error' });
+writeThirdPartyLicenses(autoEntries(bundledPackages(mermaidMeta.metafile), '図の表示 Mermaid とその部品'));
 fs.writeFileSync(path.join(root, 'dist', 'icon.ico'), makeIco(fs.readFileSync(path.join(root, 'assets', 'icon.png'))));
 fs.writeFileSync(path.join(root, 'dist', 'file-icon.ico'), makeIco(fs.readFileSync(path.join(root, 'assets', 'file-icon.png'))));
 if (watch) {
