@@ -176,6 +176,13 @@ svg text {
   white-space: nowrap;
   flex: none;
 }
+/* 自動再読み込み: オフのときだけ斜線を出す */
+#btn-auto-reload .off-slash {
+  display: none;
+}
+#btn-auto-reload[aria-pressed='false'] .off-slash {
+  display: inline;
+}
 .tb-btn.icon-only {
   width: 28px;
   padding: 0;
@@ -929,15 +936,55 @@ body.drag-over #workspace {
   padding-left: 14px;
   border-left: 1px solid var(--border);
 }
-/* 表示の文字を選んだときに出す「✎ 直す」ボタン（#preview-pane の中に絶対配置） */
-#edit-here {
+/* 「表示に戻る」（「✎ 直す」で 2 ペインに切り替えたときだけ。表示側の右上。ヒット位置のマーク・スクロールバーの左） */
+#back-to-view {
   position: absolute;
+  top: 8px;
+  right: 30px;
   z-index: 4;
   display: inline-flex;
   align-items: center;
-  gap: 4px;
+  gap: 5px;
   height: 26px;
-  padding: 0 10px 0 8px;
+  padding: 0 10px;
+  border: 1px solid var(--border);
+  border-radius: 13px;
+  background: var(--bg);
+  color: var(--fg);
+  font: inherit;
+  font-size: 12px;
+  white-space: nowrap;
+  cursor: pointer;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
+}
+#back-to-view[hidden] {
+  display: none;
+}
+#back-to-view:hover {
+  border-color: var(--accent);
+  background: var(--bg-hover);
+}
+#back-to-view:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+#back-to-view svg {
+  width: 14px;
+  height: 14px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.4;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+/* 表示の文字を選んだときに出すボタン（コピー / ✎ 直す。#preview-pane の中に絶対配置） */
+#selection-tools {
+  position: absolute;
+  z-index: 4;
+  display: inline-flex;
+  align-items: stretch;
+  height: 26px;
   border: 1px solid var(--accent);
   border-radius: 13px;
   background: var(--accent);
@@ -946,23 +993,44 @@ body.drag-over #workspace {
   line-height: 1;
   white-space: nowrap;
   box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2);
-  cursor: pointer;
 }
-#edit-here[hidden] {
+#selection-tools[hidden] {
   display: none;
 }
-#edit-here:hover {
-  filter: brightness(1.1);
+#selection-tools button {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
 }
-#edit-here:focus-visible {
+#selection-copy {
+  justify-content: center;
+  width: 30px;
+  border-radius: 12px 0 0 12px;
+}
+#edit-here {
+  padding: 0 10px 0 8px !important;
+  border-left: 1px solid color-mix(in srgb, var(--accent-fg) 45%, transparent) !important;
+  border-radius: 0 12px 12px 0;
+}
+#selection-tools button:hover {
+  background: color-mix(in srgb, var(--accent-fg) 18%, transparent);
+}
+#selection-tools button:focus-visible {
   outline: 2px solid var(--fg);
-  outline-offset: 2px;
+  outline-offset: 1px;
 }
-#edit-here svg {
+#selection-tools svg {
   width: 14px;
   height: 14px;
+  fill: none;
   stroke: currentColor;
   stroke-width: 1.4;
+  stroke-linecap: round;
   stroke-linejoin: round;
 }
 
@@ -1341,14 +1409,21 @@ body.drag-over #workspace {
 }
 
 /* ---------------- ステータスバーのクリックできる項目 ---------------- */
+/* クリックできる項目（未保存・リンク切れ・記法の確認・行 列など）。押せることが分かるよう、いつも点線の下線を付け、
+   マウスを乗せたら実線の下線と背景色にする */
 #status .st-link {
   cursor: pointer;
+  border-radius: 3px;
+  text-decoration: underline dotted color-mix(in srgb, currentColor 55%, transparent);
+  text-underline-offset: 3px;
 }
 #status .st-link:hover {
   color: var(--fg);
-  text-decoration: underline;
+  background: var(--bg-hover);
+  text-decoration: underline solid currentColor;
 }
-#st-links {
+#st-links,
+#st-syntax {
   color: var(--danger);
 }
 /* 外部での変更（通知を閉じた後も残す印）。通知バナーと同じ黄色系の色 */

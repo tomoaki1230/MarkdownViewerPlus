@@ -30,14 +30,15 @@
           <button id="btn-reload" class="tb-btn icon-only" title="ファイルから再読み込み (F5)" aria-label="再読み込み" disabled>
             <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M13 8a5 5 0 11-1.5-3.5 M13 2.5v3h-3" /></svg>
           </button>
+          <!-- 再読み込みのボタンと見分けやすいよう、矢印の中に時計の針を描く。オフのときは斜線を出す（app.css） -->
           <button id="btn-auto-reload" class="tb-btn icon-only toggle" title="自動再読み込み（ファイルが外部で変更されたら自動で読み直す）" aria-label="自動再読み込み" aria-pressed="true" disabled>
-            <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M13 8a5 5 0 11-1.5-3.5 M13 2.5v3h-3" /><circle cx="8" cy="8" r="1.6" /></svg>
+            <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M13 8a5 5 0 11-1.5-3.5 M13 2.5v3h-3" /><path d="M8 5v3.2l2 1.3" /><path class="off-slash" d="M2.5 13.5l11-11" /></svg>
           </button>
           <span class="sep"></span>
           <button id="btn-toc" class="tb-btn icon-only toggle" title="目次 (Ctrl+Shift+O)" aria-label="目次" aria-pressed="false" aria-controls="toc" disabled>
             <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M2 3.5h8M4.5 6.5h8M4.5 9.5h8M2 12.5h8" /></svg>
           </button>
-          <button id="btn-breaks" class="tb-btn icon-only toggle" title="改行で折り返す（行末の半角スペース 2 つが無くても、改行で改行して表示）" aria-label="改行で折り返す" aria-pressed="false" disabled>
+          <button id="btn-breaks" class="tb-btn icon-only toggle" title="改行で折り返す（ソースの改行を、そのまま表示でも改行する。長い行を画面の端で折り返す設定ではありません）" aria-label="改行で折り返す" aria-pressed="false" disabled>
             <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M2 4h11.5a1.5 1.5 0 010 3H9 M2 11h5 M10.5 5.5L9 7l1.5 1.5" /></svg>
           </button>
           <button id="btn-width" class="tb-btn icon-only" title="表示幅（プレビューの本文の幅）" aria-label="表示幅" aria-haspopup="menu" disabled>
@@ -177,12 +178,22 @@
       <div id="splitter" role="separator" aria-orientation="vertical" title="ドラッグで幅を変更（ダブルクリックで中央に戻す）"><span class="grip"></span></div>
       <section id="preview-pane">
         <div id="preview" tabindex="0"></div>
-        <div id="pv-ruler" class="hit-ruler" aria-hidden="true" hidden></div>
-        <!-- 表示の文字を選んだときに、そのそばに出す「ここを直す」ボタン（app.js の updateEditHereButton が位置を決める） -->
-        <button id="edit-here" type="button" title="選んだ文字を編集側で直す (Enter / F2)" hidden>
-          <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M11.5 2.5l2 2L6 12H4v-2z" /><path d="M10 4l2 2" /></svg>
-          直す
+        <!-- 「✎ 直す」で表示モードから 2 ペインに切り替えたときだけ出す（app.js の updateBackToView） -->
+        <button id="back-to-view" type="button" title="表示モードに戻る (Ctrl+1)" hidden>
+          <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M1 8s2.5-5 7-5 7 5 7 5-2.5 5-7 5-7-5-7-5z" /><circle cx="8" cy="8" r="2" /></svg>
+          表示に戻る
         </button>
+        <div id="pv-ruler" class="hit-ruler" aria-hidden="true" hidden></div>
+        <!-- 表示の文字を選んだときに、そのそばに出すボタン（コピー / ここを直す。app.js の updateEditHereButton が位置を決める） -->
+        <div id="selection-tools" hidden>
+          <button id="selection-copy" type="button" title="選んだ文字をコピー" aria-label="選んだ文字をコピー">
+            <svg viewBox="0 0 16 16" aria-hidden="true"><rect x="5.5" y="5.5" width="8" height="8" rx="1" /><path d="M10.5 5.5v-2a1 1 0 0 0-1-1h-6a1 1 0 0 0-1 1v6a1 1 0 0 0 1 1h2" /></svg>
+          </button>
+          <button id="edit-here" type="button" title="選んだ文字を編集側で直す (Enter / F2)">
+            <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M11.5 2.5l2 2L6 12H4v-2z" /><path d="M10 4l2 2" /></svg>
+            直す
+          </button>
+        </div>
       </section>
     </main>
 
@@ -217,6 +228,7 @@
       <span id="st-external" class="st-item st-link" title="クリックで外部での変更の通知を再表示" hidden></span>
       <span id="st-dirty" class="st-item st-link" title="クリックで変更点を表示 (Ctrl+D)" hidden>● 未保存</span>
       <span id="st-links" class="st-item st-link" title="クリックで次のリンク切れへ移動" hidden></span>
+      <span id="st-syntax" class="st-item st-link" hidden></span>
       <span id="st-readonly" class="st-item" hidden>読み取り専用</span>
       <span id="st-search" class="st-item" hidden></span>
       <span id="st-pos" class="st-item st-link" title="クリックで指定行へ移動 (Ctrl+G)"></span>

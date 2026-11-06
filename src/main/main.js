@@ -1,5 +1,5 @@
 // メインプロセス: ウィンドウ管理（1ウィンドウ1ファイル）・予備ウィンドウ・トレイ常駐・ファイル入出力
-import { app, BrowserWindow, desktopCapturer, dialog, ipcMain, Menu, nativeImage, nativeTheme, screen, shell, Tray } from 'electron';
+import { app, BrowserWindow, clipboard, desktopCapturer, dialog, ipcMain, Menu, nativeImage, nativeTheme, screen, shell, Tray } from 'electron';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -1126,6 +1126,12 @@ function registerIpc() {
   });
   // 表示幅の選択メニュー（ツールバーのボタンから）
   // プレビューの右クリック: コピー / ここを直す / リンクをブラウザで開く（レンダラーが状態を添えて頼む）
+  // コードブロックのコピーボタン。Windows の改行にそろえる（メモ帳など古いアプリに貼り付けても行が崩れないように）
+  ipcMain.handle('ui:copy-text', (_e, text) => {
+    if (typeof text !== 'string') return false;
+    clipboard.writeText(process.platform === 'win32' ? text.replace(/\r?\n/g, '\r\n') : text);
+    return true;
+  });
   ipcMain.on('ui:preview-context-menu', (e, info) => {
     const ctx = ctxFromEvent(e);
     if (!ctx || ctx.win.isDestroyed()) return;
@@ -1196,6 +1202,21 @@ function registerIpc() {
     }
   });
   // プレビューのリンク切れの検出: file: の URL が指すファイル（フォルダ）があるか。存在の確認だけで中身は読まない
+  // 表示の画像の更新: file: の URL が指すファイルの更新日時と大きさ（中身は読まない）。ファイルでなければ null
+  ipcMain.handle('doc:stat-files', (_e, urls) => {
+    if (!Array.isArray(urls)) return [];
+    return Promise.all(
+      urls.slice(0, 5000).map(async (u) => {
+        if (typeof u !== 'string' || !u.startsWith('file:')) return null;
+        try {
+          const st = await fs.promises.stat(fileURLToPath(u));
+          return st.isFile() ? { mtimeMs: st.mtimeMs, size: st.size } : null;
+        } catch {
+          return null;
+        }
+      }),
+    );
+  });
   ipcMain.handle('doc:check-files', (_e, urls) => {
     if (!Array.isArray(urls)) return [];
     return urls.slice(0, 5000).map((u) => {
@@ -1314,7 +1335,7 @@ if (!app.requestSingleInstanceLock()) {
 
     // E2E テスト用: main のインスペクタから dialog を差し替えたり状態を参照できるようにする
     if (process.env.MVP_E2E) {
-      globalThis.__mvp = { app, dialog, shell, Menu, desktopCapturer, contexts, openFile, openFiles, openEmptyWindow, visibleContexts, cascadePosition, get spare() { return spare; }, get tray() { return tray; } };
+      globalThis.__mvp = { app, clipboard, dialog, shell, Menu, desktopCapturer, contexts, openFile, openFiles, openEmptyWindow, visibleContexts, cascadePosition, get spare() { return spare; }, get tray() { return tray; } };
     }
   });
 }

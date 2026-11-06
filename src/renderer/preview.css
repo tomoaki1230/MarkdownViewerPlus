@@ -345,3 +345,53 @@ pre.mermaid-pending {
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
+
+/* コードブロックのコピーボタン（code-copy.js）。枠は見た目を変えない */
+.code-block {
+  position: relative;
+}
+.code-copy {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 1px solid var(--pv-border);
+  border-radius: 6px;
+  background: var(--pv-bg);
+  color: var(--pv-muted);
+  cursor: pointer;
+  opacity: 0;
+  user-select: none;
+}
+.code-block:hover .code-copy,
+.code-copy:focus-visible,
+.code-copy.done {
+  opacity: 1;
+}
+.code-copy:hover {
+  color: var(--pv-fg);
+}
+.code-copy:focus-visible {
+  outline: 2px solid var(--pv-link);
+  outline-offset: 1px;
+}
+.code-copy.done {
+  color: var(--pv-link);
+}
+.code-copy.failed {
+  color: var(--danger, #cf222e);
+}
+.code-copy svg {
+  width: 16px;
+  height: 16px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.4;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}

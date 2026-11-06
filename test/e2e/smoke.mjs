@@ -9,6 +9,7 @@ import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import net from 'node:net';
 import path from 'node:path';
+import { encodePng } from '../../scripts/icon.mjs';
 import { fileURLToPath } from 'node:url';
 import Encoding from 'encoding-japanese';
 import electronPath from 'electron';
@@ -1265,7 +1266,7 @@ try {
     await waitFor(() => fq(`document.querySelectorAll('#ed-mirror [class*="chg-"]').length === 0 && document.querySelector('#st-dirty').hidden`), { label: '印が消える' });
   });
 
-  await step('変更点の確認（Ctrl+D）: 差分と 1 行の中の変わった部分を表示し、そこから保存できる', async () => {
+  await step('変更点の確認（Ctrl+D）: 差分と 1 行の中の変わった部分を表示する。見るだけの画面で保存ボタンは無く、Enter では保存されない', async () => {
     await fset(featText.replace('最初の段落です。誤記', '最初の段落です。誤字'));
     await fkey('d', 'ctrlKey: true');
     const view = await waitFor(
@@ -1290,11 +1291,20 @@ try {
       add: ['最初の段落です。誤字があります。'],
       marks: ['記', '字'],
       count: '1 か所',
-      buttons: ['保存', '閉じる'],
+      buttons: ['閉じる'],
     });
-    await fq(`document.querySelector('#diff-dialog .df-buttons .primary').click(), true`);
+    // 開いた直後に Enter を押しても（フォーカスは「閉じる」）、閉じるだけで保存しない
+    const savedBefore = fs.readFileSync(featPath, 'utf8');
+    assert.equal(await fq(`document.activeElement?.textContent`), '閉じる');
+    await fq(`(document.activeElement.click(), true)`);
+    await waitFor(() => fq(`!document.querySelector('#diff-dialog').open`), { label: '閉じる' });
+    await sleep(300);
+    assert.equal(fs.readFileSync(featPath, 'utf8'), savedBefore, '保存されない');
+    assert.equal(await fq(`!document.querySelector('#st-dirty').hidden`), true, '未保存のまま');
+    // 保存は閉じてから Ctrl+S で行う
+    await fkey('s', 'ctrlKey: true');
     await waitFor(() => fs.readFileSync(featPath, 'utf8').includes('誤字'), { label: '保存' });
-    await waitFor(() => fq(`document.querySelector('#st-dirty').hidden && !document.querySelector('#diff-dialog').open`), { label: '保存後' });
+    await waitFor(() => fq(`document.querySelector('#st-dirty').hidden`), { label: '保存後' });
     // ステータスバーの「● 未保存」をクリックしても開く
     await fset(featText);
     await waitFor(() => fq(`!document.querySelector('#st-dirty').hidden`), { label: '未保存' });
@@ -1391,9 +1401,9 @@ try {
   await step('「✎ 直す」ボタン: 表示の文字を選ぶと選択のそばに出て、押すと 2 ペインで同じ文字を選ぶ。Esc・編集モードでは隠れる', async () => {
     await fkey('1', 'ctrlKey: true');
     await selectInPreview('二つ目', '誤記');
-    await waitFor(() => fq(`!document.querySelector('#edit-here').hidden`), { label: 'ボタン' });
+    await waitFor(() => fq(`!document.querySelector('#selection-tools').hidden`), { label: 'ボタン' });
     const pos = await fq(`(() => {
-      const b = document.querySelector('#edit-here').getBoundingClientRect();
+      const b = document.querySelector('#selection-tools').getBoundingClientRect();
       const r = document.getSelection().getRangeAt(0).getClientRects()[0];
       const pv = document.querySelector('#preview').getBoundingClientRect();
       return { near: Math.abs(b.bottom - r.top) < 14 || Math.abs(b.top - r.bottom) < 14, inside: b.left >= pv.left && b.right <= pv.right && b.top >= pv.top && b.bottom <= pv.bottom, noOverlap: b.bottom <= r.top + 0.5 || b.top >= r.bottom - 0.5 };
@@ -1401,20 +1411,40 @@ try {
     assert.deepEqual(pos, { near: true, inside: true, noOverlap: true });
     // Esc で隠れる
     await fkey('Escape');
-    assert.equal(await fq(`document.querySelector('#edit-here').hidden`), true);
+    assert.equal(await fq(`document.querySelector('#selection-tools').hidden`), true);
     // もう一度選んで押す（同じ範囲を選び直しても選択の変化にならないので、一度外す）
     await fq(`(document.getSelection().removeAllRanges(), true)`);
     await sleep(50);
     await selectInPreview('二つ目', '誤記');
-    await waitFor(() => fq(`!document.querySelector('#edit-here').hidden`), { label: 'ボタン（2 回目）' });
+    await waitFor(() => fq(`!document.querySelector('#selection-tools').hidden`), { label: 'ボタン（2 回目）' });
     await fq(`document.querySelector('#edit-here').click(), true`);
     assert.deepEqual(await editorSel(), { mode: 'split', selected: '誤記', start: expectedStart, focus: true });
-    assert.equal(await fq(`document.querySelector('#edit-here').hidden`), true, '押したら隠れる');
+    assert.equal(await fq(`document.querySelector('#selection-tools').hidden`), true, '押したら隠れる');
     // 2 ペインでも、表示側で選ぶと出る。編集モードにすると隠れる
     await selectInPreview('最初の段落', '誤記');
-    await waitFor(() => fq(`!document.querySelector('#edit-here').hidden`), { label: '2 ペインのボタン' });
+    await waitFor(() => fq(`!document.querySelector('#selection-tools').hidden`), { label: '2 ペインのボタン' });
     await fkey('2', 'ctrlKey: true');
-    assert.equal(await fq(`document.querySelector('#edit-here').hidden`), true);
+    assert.equal(await fq(`document.querySelector('#selection-tools').hidden`), true);
+  });
+
+  await step('選択のそばのコピーのボタン: 選んだ文字をコピーし、結果を表示して元に戻る。選択とボタンは残り、続けて「直す」が使える', async () => {
+    await main.evaluate(`(() => { globalThis.__copied2 = []; globalThis.__origWrite = globalThis.__mvp.clipboard.writeText; globalThis.__mvp.clipboard.writeText = (t) => globalThis.__copied2.push(t); return true; })()`);
+    await fkey('1', 'ctrlKey: true');
+    await fq(`(document.getSelection().removeAllRanges(), true)`);
+    await sleep(50);
+    await selectInPreview('二つ目', '誤記');
+    await waitFor(() => fq(`!document.querySelector('#selection-tools').hidden`), { label: 'ボタン' });
+    const order = await fq(`[...document.querySelector('#selection-tools').querySelectorAll('button')].map((b) => b.id)`);
+    assert.deepEqual(order, ['selection-copy', 'edit-here'], '左がコピー、右が直す');
+    await fq(`document.querySelector('#selection-copy').click(), true`);
+    await waitFor(() => fq(`document.querySelector('#selection-copy').title === 'コピーしました'`), { label: '結果' });
+    assert.deepEqual(await main.evaluate('globalThis.__copied2'), ['誤記']);
+    assert.deepEqual(await fq(`[document.body.dataset.mode, document.getSelection().toString(), document.querySelector('#selection-tools').hidden]`), ['view', '誤記', false]);
+    await waitFor(() => fq(`document.querySelector('#selection-copy').title === '選んだ文字をコピー'`), { label: '元に戻る', timeout: 5000 });
+    // 続けて「直す」
+    await fq(`document.querySelector('#edit-here').click(), true`);
+    assert.deepEqual(await editorSel(), { mode: 'split', selected: '誤記', start: expectedStart, focus: true });
+    await main.evaluate(`(globalThis.__mvp.clipboard.writeText = globalThis.__origWrite, true)`);
   });
 
   await step('Enter / F2: 表示の文字を選んで押すと、2 ペインで同じ文字を選ぶ', async () => {
@@ -1987,6 +2017,206 @@ try {
     // Mermaid が作業用に作る一時的な要素は残らない
     assert.deepEqual(await run(`[...document.body.children].filter((e) => /mermaid/i.test(e.id)).map((e) => e.id)`), []);
     await main.evaluate(`${w}.win.destroy(), true`);
+  });
+
+  await step('コードブロックのコピーボタン: 押すと最後の改行を除いてコピーし、結果を表示して元に戻る。Mermaid には付かず、検索に混ざらず、書き直しても付く', async () => {
+    const f = path.join(work, 'code-copy.md');
+    fs.writeFileSync(f, ['# コード', '', '```bash', 'echo 1', '  echo 2', '```', '', '```mermaid', 'flowchart LR', '  A --> B', '```', '', '```', 'x'.repeat(3000), '```', ''].join('\n'));
+    await main.evaluate(`(() => { globalThis.__copied = []; globalThis.__mvp.clipboard.writeText = (t) => globalThis.__copied.push(t); return true; })()`);
+    await main.evaluate(`globalThis.__mvp.openFile(${JSON.stringify(f)}).then(() => true)`);
+    const w = `globalThis.__mvp.visibleContexts().find((x) => x.doc?.path === ${JSON.stringify(f)})`;
+    const run = (js) => main.evaluate(`${w}.win.webContents.executeJavaScript(${JSON.stringify(`(async () => (${js}))()`)})`);
+    const R = `document.querySelector('#preview').shadowRoot`;
+    await waitFor(() => run(`${R}.querySelectorAll('.mermaid-figure svg').length === 1`), { label: '表示', timeout: 30000 });
+    assert.equal(await run(`${R}.querySelectorAll('.code-copy').length`), 2, 'Mermaid には付かない');
+    await run(`${R}.querySelector('.code-copy').click(), true`);
+    await waitFor(() => run(`${R}.querySelector('.code-copy').title === 'コピーしました'`), { label: '結果の表示' });
+    assert.deepEqual(await main.evaluate('globalThis.__copied'), ['echo 1\n  echo 2']);
+    await waitFor(() => run(`${R}.querySelector('.code-copy').title === 'コードをコピー'`), { label: '元に戻る', timeout: 5000 });
+    // 横にスクロールしても、ボタンは右上に留まる
+    const pos = await run(`(() => { const pre = ${R}.querySelectorAll('pre:not(:has(.language-mermaid))')[1]; const btn = pre.parentElement.querySelector('.code-copy'); const a = btn.getBoundingClientRect().left; pre.scrollLeft = 500; return { moved: pre.scrollLeft, same: btn.getBoundingClientRect().left === a }; })()`);
+    assert.ok(pos.moved > 0 && pos.same, JSON.stringify(pos));
+    // 検索・リンク切れの検出に影響しない。2 ペインで書き直しても付く
+    await run(`(() => { window.dispatchEvent(new KeyboardEvent('keydown', { key: 'f', ctrlKey: true })); const s = document.querySelector('#search-input'); s.value = 'コピー'; s.dispatchEvent(new Event('input')); return true; })()`);
+    assert.equal(await run(`window.__mvpState.search.matches.length`), 0, 'ボタンの名前は検索に出ない');
+    await run(`(window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' })), true)`);
+    await run(`(() => { window.dispatchEvent(new KeyboardEvent('keydown', { key: '3', ctrlKey: true })); const ta = document.querySelector('#ed-input'); ta.value += '\\n\\n~~~\\n追加\\n~~~\\n'; ta.dispatchEvent(new Event('input')); return true; })()`);
+    await waitFor(() => run(`${R}.querySelectorAll('.code-copy').length === 3`), { label: '書き直し' });
+    await main.evaluate(`${w}.win.destroy(), true`);
+  });
+
+  await step('画像の自動更新: 画像を変更すると新しくなり、文字を入力して表示を作り直しても古い画像に戻らない。自動再読み込みがオフなら更新ボタンで新しくなる', async () => {
+    const png = (w) => encodePng({ width: w, height: 4, data: new Uint8Array(w * 4 * 4).fill(200) });
+    const img = path.join(work, 'refresh.png');
+    const f = path.join(work, 'refresh.md');
+    fs.writeFileSync(img, png(10));
+    fs.writeFileSync(f, '# 画像\n\n![図](refresh.png)\n');
+    await main.evaluate(`globalThis.__mvp.openFile(${JSON.stringify(f)}).then(() => true)`);
+    const w = `globalThis.__mvp.visibleContexts().find((x) => x.doc?.path === ${JSON.stringify(f)})`;
+    const run = (js) => main.evaluate(`${w}.win.webContents.executeJavaScript(${JSON.stringify(`(async () => (${js}))()`)})`);
+    const width = () => run(`document.querySelector('#preview').shadowRoot.querySelector('img')?.naturalWidth ?? null`);
+    await waitFor(async () => (await width()) === 10, { label: '最初の画像' });
+    await sleep(1300);
+    fs.writeFileSync(img, png(20));
+    await waitFor(async () => (await width()) === 20, { label: '自動の更新', timeout: 6000 });
+    // 表示を作り直しても戻らない。文書には印が入らない
+    await run(`(() => { window.dispatchEvent(new KeyboardEvent('keydown', { key: '3', ctrlKey: true })); const ta = document.querySelector('#ed-input'); ta.value += '追記'; ta.dispatchEvent(new Event('input')); return true; })()`);
+    await waitFor(() => run(`document.querySelector('#preview').shadowRoot.textContent.includes('追記')`), { label: '描き直し' });
+    await sleep(200);
+    assert.equal(await width(), 20);
+    assert.ok(!(await run(`document.querySelector('#ed-input').value.includes('mvp-v')`)));
+    await run(`(() => { const ta = document.querySelector('#ed-input'); ta.value = ta.value.replace('追記', ''); ta.dispatchEvent(new Event('input')); return true; })()`);
+    await waitFor(() => run(`document.querySelector('#st-dirty').hidden`), { label: '未保存が消える' });
+    // 自動再読み込みがオフ
+    await run(`document.querySelector('#btn-auto-reload').click(), true`);
+    await waitFor(() => run(`document.querySelector('#btn-auto-reload').getAttribute('aria-pressed') === 'false'`), { label: 'オフ' });
+    await sleep(1200);
+    fs.writeFileSync(img, png(30));
+    await sleep(1800);
+    assert.equal(await width(), 20, 'オフなら自動では更新しない');
+    await run(`document.querySelector('#btn-reload').click(), true`);
+    await waitFor(async () => (await width()) === 30, { label: '更新ボタン', timeout: 6000 });
+    await run(`document.querySelector('#btn-auto-reload').click(), true`);
+    await waitFor(() => run(`document.querySelector('#btn-auto-reload').getAttribute('aria-pressed') === 'true'`), { label: 'オンに戻す' });
+    await main.evaluate(`${w}.win.destroy(), true`);
+  });
+
+  await step('記法の確認: 修正で崩れると画面下に件数を出し、クリックでその行へ移動して理由を表示する。元からの崩れは出さず、直す・保存すると消える', async () => {
+    const f = path.join(work, 'syntax.md');
+    const text = '# 題\n\n[元から](x\n\n```\ncode\n```\n\n本文\n';
+    fs.writeFileSync(f, text);
+    await main.evaluate(`globalThis.__mvp.openFile(${JSON.stringify(f)}).then(() => true)`);
+    const w = `globalThis.__mvp.visibleContexts().find((x) => x.doc?.path === ${JSON.stringify(f)})`;
+    const run = (js) => main.evaluate(`${w}.win.webContents.executeJavaScript(${JSON.stringify(`(async () => (${js}))()`)})`);
+    const setText = (t) => run(`(() => { const ta = document.querySelector('#ed-input'); ta.value = ${JSON.stringify(t)}; ta.dispatchEvent(new Event('input')); return true; })()`);
+    const item = () => run(`(() => { const e = document.querySelector('#st-syntax'); return e.hidden ? null : e.textContent; })()`);
+    await waitFor(() => run(`document.querySelector('#ed-input').value.startsWith('# 題')`), { label: '開く' });
+    await run(`(window.dispatchEvent(new KeyboardEvent('keydown', { key: '2', ctrlKey: true })), true)`);
+    // 元からの崩れは出さない（別の所を直しても）
+    await setText(text.replace('本文', '本文を直した'));
+    await sleep(600);
+    assert.equal(await item(), null, '元からの崩れは出さない');
+    // コードブロックの閉じる行を消す
+    await setText(text.replace('code\n```\n', 'code\n'));
+    await waitFor(async () => (await item()) === '記法の確認 1', { label: '崩れの表示' });
+    await run(`document.querySelector('#st-syntax').click(), true`);
+    const at = await run(`(() => { const ta = document.querySelector('#ed-input'); return { line: ta.value.slice(0, ta.selectionStart).split('\\n').length, msg: document.querySelector('#st-message').textContent }; })()`);
+    assert.equal(at.line, 5);
+    assert.match(at.msg, /5 行目.*コードブロックが閉じられていません/);
+    // 2 つ目の崩れと、クリックで順に移動
+    await setText(`${text.replace('code\n```\n', 'code\n```\n')}\n| a | b |\n| - | - |\n| 1 |\n\n[新しい](y\n`);
+    await waitFor(async () => (await item()) === '記法の確認 2', { label: '2 件' });
+    const lines = [];
+    for (let i = 0; i < 3; i++) {
+      await run(`document.querySelector('#st-syntax').click(), true`);
+      lines.push(await run(`(() => { const ta = document.querySelector('#ed-input'); return ta.value.slice(0, ta.selectionStart).split('\\n').length; })()`));
+    }
+    assert.deepEqual(lines, [13, 15, 13], '順に移動し、最後の次は最初へ');
+    // 直すと消える
+    await setText(text);
+    await waitFor(async () => (await item()) === null, { label: '直すと消える' });
+    // 崩したまま保存すると、保存した内容が基準になり消える。保存は止めない
+    await setText(`${text}\n[新しい](y\n`);
+    await waitFor(async () => (await item()) === '記法の確認 1', { label: '再び' });
+    await run(`(window.dispatchEvent(new KeyboardEvent('keydown', { key: 's', ctrlKey: true })), true)`);
+    await waitFor(async () => fs.readFileSync(f, 'utf8').includes('[新しい](y'), { label: '保存は止めない' });
+    await waitFor(async () => (await item()) === null, { label: '保存で消える' });
+    await main.evaluate(`${w}.win.destroy(), true`);
+  });
+
+  await step('使いやすさ（1.2.1）: 検索のヒットをそのまま直す・表示に戻る・折りたたみの中のヒット・リストの記号の引き継ぎ・アイコンとステータスバーの見た目', async () => {
+    const f = path.join(work, 'ux121.md');
+    const text = '# 題\n\n一つ目の誤記です。\n\n<details><summary>概要の誤記</summary>\n\n中に隠れた語です。\n\n</details>\n\n二つ目の誤記です。\n';
+    fs.writeFileSync(f, text);
+    await main.evaluate(`globalThis.__mvp.openFile(${JSON.stringify(f)}).then(() => true)`);
+    const w = `globalThis.__mvp.visibleContexts().find((x) => x.doc?.path === ${JSON.stringify(f)})`;
+    const run = (js) => main.evaluate(`${w}.win.webContents.executeJavaScript(${JSON.stringify(`(async () => (${js}))()`)})`);
+    const key = (k, opts = '') => run(`(window.dispatchEvent(new KeyboardEvent('keydown', { key: ${JSON.stringify(k)}, bubbles: true, cancelable: true, ${opts} })), true)`);
+    const search = (q) => run(`(() => { const i = document.querySelector('#search-input'); i.value = ${JSON.stringify(q)}; i.dispatchEvent(new Event('input')); return document.querySelector('#search-count').textContent; })()`);
+    const toolsShown = () => run(`!document.querySelector('#selection-tools').hidden`);
+    await waitFor(() => run(`document.body.dataset.mode === 'view' && document.querySelector('#ed-input').value.startsWith('# 題')`), { label: '開く' });
+
+    // 1. 表示モードの検索: 今のヒットのそばに「コピー / ✎ 直す」が出て、F2 で直せる（2 つ目のヒットへ移ってから）
+    await key('f', 'ctrlKey: true');
+    assert.equal(await search('誤記'), '1 / 3 件');
+    await waitFor(toolsShown, { label: 'ヒットのそばのボタン' });
+    await run(`(document.querySelector('#search-input').dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true })), true)`);
+    await run(`(document.querySelector('#search-input').dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true })), true)`);
+    assert.equal(await run(`document.querySelector('#search-count').textContent`), '3 / 3 件', 'Enter は検索の次へのまま');
+    const near = await run(`(() => {
+      const b = document.querySelector('#selection-tools').getBoundingClientRect();
+      const pv = document.querySelector('#preview').getBoundingClientRect();
+      return !document.querySelector('#selection-tools').hidden && b.top >= pv.top && b.bottom <= pv.bottom;
+    })()`);
+    assert.equal(near, true, 'ボタンは表示の中');
+    await key('F2');
+    const second = text.lastIndexOf('誤記');
+    const sel = await run(`(() => { const ta = document.querySelector('#ed-input'); return { mode: document.body.dataset.mode, start: ta.selectionStart, text: ta.value.slice(ta.selectionStart, ta.selectionEnd), focus: document.activeElement === ta, count: document.querySelector('#search-count').textContent }; })()`);
+    assert.deepEqual(sel, { mode: 'split', start: second, text: '誤記', focus: true, count: '3 / 3 件' }, '2 ペインで同じ文字を選び、編集側でも同じヒットが今のヒット');
+
+    // 2. 「表示に戻る」: 「✎ 直す」で 2 ペインにしたときだけ出て、押すと表示モードに戻る
+    assert.equal(await run(`document.querySelector('#back-to-view').hidden`), false, '出る');
+    await run(`document.querySelector('#back-to-view').click(), true`);
+    assert.deepEqual(await run(`[document.body.dataset.mode, document.querySelector('#back-to-view').hidden]`), ['view', true]);
+    await key('3', 'ctrlKey: true');
+    assert.equal(await run(`document.querySelector('#back-to-view').hidden`), true, '普通に 2 ペインにしたときは出ない');
+    await key('1', 'ctrlKey: true');
+
+    // 検索を Esc で閉じると、表示側でも今のヒットが選ばれた状態になり、Enter で直せる
+    await key('f', 'ctrlKey: true');
+    assert.equal(await search('誤記'), '1 / 3 件');
+    await key('Escape');
+    assert.equal(await run(`document.getSelection().toString()`), '誤記', '閉じるとヒットを選ぶ');
+    await waitFor(toolsShown, { label: '閉じた後のボタン' });
+    await key('Enter');
+    assert.deepEqual(await run(`(() => { const ta = document.querySelector('#ed-input'); return [document.body.dataset.mode, ta.selectionStart]; })()`), ['split', text.indexOf('誤記')]);
+    await key('1', 'ctrlKey: true');
+
+    // 8. 閉じた折りたたみの中のヒットへ移ると開く。見出し（summary）の文字のヒットでは開かない
+    await key('f', 'ctrlKey: true');
+    const details = `document.querySelector('#preview').shadowRoot.querySelector('details')`;
+    assert.equal(await run(`${details}.open`), false);
+    await search('概要の誤記');
+    assert.equal(await run(`${details}.open`), false, 'summary の文字では開かない');
+    await search('隠れた');
+    assert.equal(await run(`${details}.open`), true, '中のヒットでは開く');
+    await key('Escape');
+    await key('Escape');
+
+    const setText = (t) => run(`(() => { const ta = document.querySelector('#ed-input'); ta.value = ${JSON.stringify(t)}; ta.dispatchEvent(new Event('input')); return true; })()`);
+
+    // 5. 箇条書きの Enter: 次の行に記号を入れ、記号だけの行ではリストを終える。元に戻すは 1 回で戻る
+    await key('2', 'ctrlKey: true');
+    const enter = (t) =>
+      run(`(() => {
+        const ta = document.querySelector('#ed-input');
+        ta.focus();
+        ta.value = ${JSON.stringify(t)};
+        ta.dispatchEvent(new Event('input'));
+        ta.setSelectionRange(ta.value.length, ta.value.length);
+        const ev = new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true });
+        ta.dispatchEvent(ev);
+        return { value: ta.value, caret: ta.selectionStart, prevented: ev.defaultPrevented };
+      })()`);
+    assert.deepEqual(await enter('- 項目'), { value: '- 項目\n- ', caret: 7, prevented: true });
+    assert.deepEqual(await enter('1. 一つ目'), { value: '1. 一つ目\n2. ', caret: 10, prevented: true });
+    assert.deepEqual(await enter('- 項目\n- '), { value: '- 項目\n', caret: 5, prevented: true });
+    assert.equal((await enter('普通の文')).prevented, false, 'リストでなければ普通の改行');
+    await enter('- [x] 済み');
+    assert.equal(await run(`document.querySelector('#ed-input').value`), '- [x] 済み\n- [ ] ');
+    await run(`document.querySelector('[data-action=undo]').click(), true`);
+    assert.equal(await run(`document.querySelector('#ed-input').value`), '- [x] 済み', '元に戻すで 1 回で戻る');
+    await setText(text);
+
+    // 12. 自動再読み込みのアイコン: オフのときだけ斜線。15. ステータスバーのクリックできる項目に点線の下線
+    const slash = () => run(`getComputedStyle(document.querySelector('#btn-auto-reload .off-slash')).display`);
+    assert.equal(await slash(), 'none');
+    await run(`document.querySelector('#btn-auto-reload').click(), true`);
+    await waitFor(async () => (await slash()) !== 'none', { label: 'オフで斜線' });
+    await run(`document.querySelector('#btn-auto-reload').click(), true`);
+    await waitFor(async () => (await slash()) === 'none', { label: 'オンで斜線なし' });
+    assert.match(await run(`getComputedStyle(document.querySelector('#st-pos')).textDecorationStyle`), /dotted/);
+    await main.evaluate(`${w}.win.close(), true`);
   });
 
   await step('キーボード ショートカットの一覧（F1・ヘルプ メニュー）と、新しいメニュー項目', async () => {

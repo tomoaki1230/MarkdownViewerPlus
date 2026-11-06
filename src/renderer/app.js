@@ -1,5 +1,6 @@
 // レンダラーのエントリポイント
 import DOMPurify from 'dompurify';
+import { copyWithResult, decorateCodeBlocks, resetCopyResult, runCodeCopy } from './code-copy.js';
 import { createDiffDialog } from './diff-dialog.js';
 import { MirrorEditor } from './editor.js';
 import { emojiMap } from './emoji.js';
@@ -9,6 +10,8 @@ import { findBrokenLinks } from './link-check.js';
 import { createTocPanel } from './toc-panel.js';
 import { previewFontCss, previewLineHeight } from './preview-style.js';
 import { createMarkdownRenderer } from './markdown.js';
+import { createImageRefresher } from './image-refresh.js';
+import { continueList } from './list-continue.js';
 import { createMermaidView, mermaidConfig } from './mermaid-view.js';
 import { buildTextIndex, rangeFor } from './preview-search.js';
 import { findMatches, indexAtOrAfter } from './search.js';
@@ -17,6 +20,7 @@ import { createSettingsDialog } from './settings-dialog.js';
 import { createShortcutsHelp } from './shortcuts-help.js';
 import { createSyntaxHelp } from './syntax-help.js';
 import { createThemePicker } from './theme-picker.js';
+import { newSyntaxIssues } from './syntax-check.js';
 import { findTheme, themeCssVars } from '../shared/themes.js';
 
 // 起動計測用の時刻（依存ライブラリの評価が終わり、アプリ本体の実行を始めた時刻）
@@ -93,7 +97,9 @@ const els = {
   stMode: $('#st-mode'),
   stMessage: $('#st-message'),
   stLinks: $('#st-links'),
+  stSyntax: $('#st-syntax'),
   stExternal: $('#st-external'),
+  backToView: $('#back-to-view'),
 };
 
 const state = {
@@ -108,6 +114,7 @@ const state = {
   search: { open: false, matches: [], current: -1, error: null, truncated: false },
   saving: false,
   changeCount: 0, // 保存済みの内容からの変更の数（変更のまとまりの数）
+  returnToView: false, // 「✎ 直す」で表示モードから 2 ペインに切り替えた（「表示に戻る」ボタンを出す）
   brokenLinks: [], // プレビューのリンク切れの要素
   brokenIndex: -1,
   // 外部での変更の通知（通知バナーを閉じても、ステータスバーの印から出し直せるように覚えておく）
@@ -136,6 +143,24 @@ const mermaidView = createMermaidView({
   },
 });
 
+// 表示の画像の更新（image-refresh.js）。自動再読み込みがオンで、表示が見えているときだけ調べる
+const imageRefresher = createImageRefresher({
+  root: article,
+  scroller: els.preview,
+  stat: (urls) => api.statFiles(urls),
+  isActive: () => Boolean(state.doc) && appSettings.autoReload && state.mode !== 'edit' && !document.hidden,
+  keepPosition: () => {
+    const line = previewTopLine();
+    return () => {
+      state.anchors = null;
+      state.scrollLock = { source: 'preview', until: performance.now() + 400 };
+      scrollPreviewToLine(line);
+    };
+  },
+});
+document.addEventListener('visibilitychange', () => imageRefresher.kick());
+window.addEventListener('focus', () => imageRefresher.kick());
+
 function renderPreview({ force = false } = {}) {
   clearTimeout(state.previewTimer);
   state.previewTimer = null;
@@ -147,6 +172,8 @@ function renderPreview({ force = false } = {}) {
   article.innerHTML = html;
   // Mermaid のコードブロックを図にする（同じ図は覚えている結果ですぐに、新しい図は後から描く）
   mermaidView.apply(article);
+  decorateCodeBlocks(article);
+  imageRefresher.afterRender();
   marks['プレビュー DOM 挿入'] ??= Date.now();
   state.anchors = null;
   highlightCode();
@@ -196,6 +223,11 @@ function highlightCode() {
 
 // プレビュー内のリンク: 外部は既定ブラウザ、#見出しは内部スクロール、相対 .md は新しいウィンドウ
 article.addEventListener('click', (e) => {
+  const copy = e.target.closest('.code-copy');
+  if (copy) {
+    runCodeCopy(copy, api.copyText);
+    return;
+  }
   if (e.target.closest('input[type="checkbox"]')) {
     e.preventDefault();
     return;
@@ -248,7 +280,7 @@ api.onGotoAnchor((raw) => {
 
 // 表示の文字を選んで「ここを直す」: 表示モードなら 2 ペインに切り替え、編集側で同じ文字を選択する。
 // ダブルクリックは普通の単語の選択に使う（以前はダブルクリックで切り替えていたが、単語を選んでコピーしにくかった）。
-// 呼び出し方は 3 つ: 選択のそばに出る「✎ 直す」ボタン / 右クリックの「ここを直す」 / Enter・F2 キー。
+// 呼び出し方は 3 つ: 選択のそばに出る「✎ 直す」ボタン（コピーのボタンと並ぶ） / 右クリックの「ここを直す」 / Enter・F2 キー。
 // （選んだ語を、そのブロックのソース行の範囲から探す。見つからなければブロックの先頭行へ）
 
 /** プレビューの中の選択（無い・プレビューの外なら null） */
@@ -259,6 +291,30 @@ function previewSelection() {
   if (!article.contains(range.startContainer)) return null;
   if (!sel.toString().trim()) return null;
   return { sel, range };
+}
+
+/**
+ * 表示モードの検索の今のヒット（検索欄が開いていて、表示側を検索しているとき）。無ければ null
+ * @returns {{range: Range, text: string} | null}
+ */
+function currentPreviewHit() {
+  const s = state.search;
+  if (!s.open || searchTarget() !== 'preview' || s.current < 0) return null;
+  const m = s.matches[s.current];
+  const range = m ? rangeFor(previewIndex(), m.start, m.end) : null;
+  if (!range || !article.contains(range.startContainer)) return null;
+  const text = range.toString();
+  return text.trim() ? { range, text } : null;
+}
+
+/**
+ * 「コピー / ✎ 直す」の対象: 表示の中の選択。選択が無ければ、検索の今のヒット（1.2.1。検索で見つけた所をそのまま直せるように）
+ * @returns {{range: Range, text: string} | null}
+ */
+function previewPick() {
+  const picked = previewSelection();
+  if (picked) return { range: picked.range, text: picked.sel.toString() };
+  return currentPreviewHit();
 }
 
 /** 選択の始まりがあるブロック（data-line の付いた要素） */
@@ -278,24 +334,37 @@ function canEditHere() {
  */
 function editHere(block) {
   if (!canEditHere()) return;
-  const picked = previewSelection();
+  // 右クリック（block あり）で選択が無いときは、検索のヒットではなく右クリックした所を直す
+  const picked = block && !previewSelection() ? null : previewPick();
   const target = picked ? blockOfNode(picked.range.startContainer) : block;
   if (!target || !article.contains(target)) return;
-  const word = picked ? selectedWordIn(target) : null;
+  const word = picked ? selectedWordIn(target, picked) : null;
   hideEditHereButton();
-  if (state.mode === 'view') setMode('split');
+  if (state.mode === 'view') {
+    setMode('split');
+    state.returnToView = true;
+    updateBackToView();
+  }
   revealSourceOf(target, word);
+  // 検索中なら、編集側でも直す文字のヒットを今のヒットにする（そのまま次のヒットへ進める）
+  if (state.search.open && word) {
+    const { selectionStart, selectionEnd } = els.textarea;
+    runSearch({ keepPosition: false });
+    els.textarea.focus({ preventScroll: true });
+    els.textarea.setSelectionRange(selectionStart, selectionEnd);
+  }
 }
 
-/** 選んだ語（複数行なら最初の行）と、それがブロックの中で何番目に出てくるか */
-function selectedWordIn(block) {
-  const picked = previewSelection();
-  if (!picked) return null;
+/**
+ * 選んだ語（複数行なら最初の行）と、それがブロックの中で何番目に出てくるか
+ * @param {Element} block
+ * @param {{range: Range, text: string}} picked 選択、または検索のヒット（previewPick）
+ */
+function selectedWordIn(block, picked) {
   const { range } = picked;
   if (!block.contains(range.startContainer)) return null;
   // 複数の行・ブロックにまたがる選択は、最初の行の部分で探す
-  const first = picked.sel
-    .toString()
+  const first = picked.text
     .split('\n')
     .map((l) => l.trim())
     .find(Boolean);
@@ -310,22 +379,25 @@ function selectedWordIn(block) {
   return { text, nth };
 }
 
-// 選択のそばの「✎ 直す」ボタン。ドラッグ中は出さず、離してから出す。スクロールしたら付いて動き、見えなくなったら隠す
-const editHereBtn = document.querySelector('#edit-here');
+// 選択のそばのボタン（コピー / ✎ 直す）。ドラッグ中は出さず、離してから出す。スクロールしたら付いて動き、見えなくなったら隠す
+const selectionTools = document.querySelector('#selection-tools');
+const selectionCopyBtn = document.querySelector('#selection-copy');
+const SELECTION_COPY_LABEL = '選んだ文字をコピー';
 let editHereSelecting = false;
 let editHereTimer = null;
 
 function hideEditHereButton() {
   clearTimeout(editHereTimer);
   editHereTimer = null;
-  editHereBtn.hidden = true;
+  selectionTools.hidden = true;
+  resetCopyResult(selectionCopyBtn, SELECTION_COPY_LABEL);
 }
 
 function updateEditHereButton() {
   editHereTimer = null;
-  const picked = canEditHere() && !editHereSelecting ? previewSelection() : null;
+  const picked = canEditHere() && !editHereSelecting ? previewPick() : null;
   if (!picked) {
-    editHereBtn.hidden = true;
+    selectionTools.hidden = true;
     return;
   }
   const pane = els.preview.getBoundingClientRect();
@@ -333,21 +405,21 @@ function updateEditHereButton() {
   const first = rects[0] ?? picked.range.getBoundingClientRect();
   // 選択の始まりが表示の外なら出さない
   if (first.bottom < pane.top || first.top > pane.bottom) {
-    editHereBtn.hidden = true;
+    selectionTools.hidden = true;
     return;
   }
-  editHereBtn.hidden = false;
+  selectionTools.hidden = false;
   const host = els.previewPane.getBoundingClientRect();
-  const w = editHereBtn.offsetWidth;
-  const h = editHereBtn.offsetHeight;
+  const w = selectionTools.offsetWidth;
+  const h = selectionTools.offsetHeight;
   const gap = 6;
   // 選択の始まりの行の上に出す。上に場所が無ければ下に出す。左右は表示の中に収める
   let top = first.top - h - gap;
   if (top < pane.top + 2) top = first.bottom + gap;
   const scrollbar = els.preview.offsetWidth - els.preview.clientWidth;
   const left = Math.min(Math.max(first.left, pane.left + 4), pane.right - scrollbar - w - 4);
-  editHereBtn.style.left = `${Math.round(left - host.left)}px`;
-  editHereBtn.style.top = `${Math.round(top - host.top)}px`;
+  selectionTools.style.left = `${Math.round(left - host.left)}px`;
+  selectionTools.style.top = `${Math.round(top - host.top)}px`;
 }
 
 function scheduleEditHereButton(delay = 120) {
@@ -355,8 +427,13 @@ function scheduleEditHereButton(delay = 120) {
   editHereTimer = setTimeout(updateEditHereButton, delay);
 }
 
-editHereBtn.addEventListener('mousedown', (e) => e.preventDefault()); // 押しても選択を失わない
-editHereBtn.addEventListener('click', () => editHere());
+selectionTools.addEventListener('mousedown', (e) => e.preventDefault()); // 押しても選択を失わない
+document.querySelector('#edit-here').addEventListener('click', () => editHere());
+// 選んだ文字をコピーする（Ctrl+C と同じ内容）。選択とボタンは残すので、続けて「直す」も押せる
+selectionCopyBtn.addEventListener('click', () => {
+  const picked = previewPick();
+  copyWithResult(selectionCopyBtn, picked ? picked.text : '', async (text) => Boolean(text) && api.copyText(text), SELECTION_COPY_LABEL);
+});
 els.preview.addEventListener('pointerdown', (e) => {
   if (e.button !== 0) return;
   editHereSelecting = true;
@@ -369,14 +446,14 @@ window.addEventListener('pointerup', () => {
 });
 document.addEventListener('selectionchange', () => {
   if (editHereSelecting) return;
-  if (!previewSelection()) hideEditHereButton();
+  if (!previewPick()) hideEditHereButton();
   else scheduleEditHereButton();
 });
 els.preview.addEventListener('scroll', () => {
-  if (!editHereBtn.hidden) updateEditHereButton();
+  if (!selectionTools.hidden) updateEditHereButton();
 });
 window.addEventListener('resize', () => {
-  if (!editHereBtn.hidden) updateEditHereButton();
+  if (!selectionTools.hidden) updateEditHereButton();
 });
 
 // 右クリック: プレビューの中では、選択の有無・「ここを直す」が使えるかを添えて main にメニューを出してもらう
@@ -713,6 +790,47 @@ function updateDirty() {
   els.stDirty.hidden = !dirty;
   scheduleCharCount();
   scheduleChangeMarks();
+  scheduleSyntaxCheck();
+}
+
+// ---------------------------------------------------------------------------
+// 記法の確認: 修正で新しく生じた崩れを画面下に出す（syntax-check.js）。保存は止めない
+// ---------------------------------------------------------------------------
+
+let syntaxTimer = null;
+let syntaxIssues = [];
+let syntaxIndex = -1;
+
+function updateSyntaxStatus() {
+  clearTimeout(syntaxTimer);
+  syntaxTimer = null;
+  const before = syntaxIssues.map((i) => i.key).join('\u0002');
+  syntaxIssues = state.doc && state.dirty ? newSyntaxIssues(state.savedText, editor.value) : [];
+  // 崩れの一覧が変わったら、次のクリックは最初の箇所から
+  if (syntaxIssues.map((i) => i.key).join('\u0002') !== before) syntaxIndex = -1;
+  const n = syntaxIssues.length;
+  els.stSyntax.hidden = n === 0;
+  els.stSyntax.textContent = n > 0 ? `記法の確認 ${n}` : '';
+  els.stSyntax.title = n > 0 ? `クリックで次の箇所へ移動\n${syntaxIssues.slice(0, 5).map((i) => `${i.line + 1} 行目: ${i.message}`).join('\n')}` : '';
+}
+
+// 入力のたびに調べると無駄なので間引く。未保存でなくなったら（保存・読み直し）すぐ消す
+function scheduleSyntaxCheck() {
+  if (!state.dirty) {
+    updateSyntaxStatus();
+    return;
+  }
+  clearTimeout(syntaxTimer);
+  syntaxTimer = setTimeout(updateSyntaxStatus, 300);
+}
+
+function nextSyntaxIssue() {
+  updateSyntaxStatus();
+  if (syntaxIssues.length === 0) return;
+  syntaxIndex = (syntaxIndex + 1) % syntaxIssues.length;
+  const issue = syntaxIssues[syntaxIndex];
+  gotoLine(issue.line + 1);
+  showMessage(`${issue.line + 1} 行目: ${issue.message}`);
 }
 
 // ---------------------------------------------------------------------------
@@ -812,6 +930,15 @@ els.textarea.addEventListener('keydown', (e) => {
     e.preventDefault();
     document.execCommand('insertText', false, '\t');
   }
+  // 箇条書き・番号付きリスト・タスクリストの行の Enter は、次の行に同じ記号を入れる（list-continue.js。1.2.1）
+  // 日本語の変換を確定する Enter（isComposing・keyCode 229）は対象にしない
+  if (e.key === 'Enter' && !e.ctrlKey && !e.altKey && !e.shiftKey && !e.metaKey && !e.isComposing && e.keyCode !== 229) {
+    const ta = els.textarea;
+    const edit = continueList(ta.value, ta.selectionStart, ta.selectionEnd);
+    if (!edit) return;
+    e.preventDefault();
+    editor.replaceRange(edit.from, edit.to, edit.text, { selectStart: edit.caret });
+  }
 });
 
 // ---------------------------------------------------------------------------
@@ -829,6 +956,9 @@ function setMode(mode, { keepScroll = true } = {}) {
   }
 
   state.mode = mode;
+  // 「表示に戻る」ボタンは「✎ 直す」で切り替えたときだけ（editHere が切り替えた後に立てる）。ほかの切り替えでは消す
+  state.returnToView = false;
+  updateBackToView();
   els.body.dataset.mode = mode;
   els.stMode.textContent = MODE_LABELS[mode];
   notifyUiState();
@@ -838,6 +968,7 @@ function setMode(mode, { keepScroll = true } = {}) {
   // 「✎ 直す」ボタン: 編集モードでは隠し、2 ペインでは表示の幅が変わるので位置を合わせ直す
   if (mode === 'edit') hideEditHereButton();
   else scheduleEditHereButton(0);
+  imageRefresher.kick();
   updateTocLayout();
   scheduleTocCurrent();
 
@@ -862,6 +993,13 @@ function setMode(mode, { keepScroll = true } = {}) {
 }
 
 for (const b of els.modeButtons) b.addEventListener('click', () => setMode(b.dataset.mode));
+
+// 「表示に戻る」（1.2.1）: 表示モードで「✎ 直す」を使って 2 ペインになったとき、表示側の右上に出す。
+// 自動では戻さない（いつ切り替わるかが分かりにくくなるため）。押すと表示モードに戻る（Ctrl+1 と同じ）
+function updateBackToView() {
+  els.backToView.hidden = !(state.returnToView && state.mode === 'split');
+}
+els.backToView.addEventListener('click', () => setMode('view'));
 
 // ---------------------------------------------------------------------------
 // スクロール同期（ソース行 ⇔ プレビューの data-line 要素）
@@ -1046,11 +1184,27 @@ function matchRect(m) {
 
 // ヒットがプレビューの見える範囲に無ければ、画面の 1/3 付近へスクロールする
 function revealPreviewMatch(m) {
+  const range = rangeFor(previewIndex(), m.start, m.end);
+  if (range) openDetailsAround(range.startContainer);
   const rect = matchRect(m);
   if (!rect) return;
   const pv = els.preview;
   const box = pv.getBoundingClientRect();
   if (rect.top < box.top || rect.bottom > box.bottom) pv.scrollTop += rect.top - box.top - pv.clientHeight / 3;
+}
+
+// ヒットが閉じた折りたたみ（<details>）の中にあれば開く（1.2.1。閉じたままだとヒットが見えない）。
+// 見出し（<summary>）の文字は閉じていても見えるので、その折りたたみは開かない。開いたものは開いたままにする
+function openDetailsAround(node) {
+  let opened = false;
+  for (let el = node.nodeType === Node.ELEMENT_NODE ? node : node.parentElement; el && el !== article; el = el.parentElement) {
+    if (el.tagName !== 'DETAILS' || el.open) continue;
+    const summary = [...el.children].find((c) => c.tagName === 'SUMMARY');
+    if (summary?.contains(node)) continue;
+    el.open = true;
+    opened = true;
+  }
+  if (opened) state.anchors = null;
 }
 
 // プレビューで表示中の位置以降にある最初のヒット（位置は文書順に増えるので二分探索）
@@ -1174,6 +1328,8 @@ function closeSearch() {
   editor.setMatches([], -1);
   clearPreviewHits();
   const m = state.search.matches[state.search.current];
+  // 表示側のヒットの範囲（索引は閉じる前のものを使う）
+  const hitRange = !wasEditor && m ? rangeFor(previewIndex(), m.start, m.end) : null;
   state.search.matches = [];
   state.search.current = -1;
   updateHitRulers();
@@ -1183,6 +1339,13 @@ function closeSearch() {
     if (m) els.textarea.setSelectionRange(m.start, m.end);
   } else {
     els.preview.focus({ preventScroll: true });
+    // 表示側でも現在のヒットを選択状態にする（そのまま「✎ 直す」・Enter で直せる。1.2.1）
+    if (hitRange) {
+      const sel = document.getSelection();
+      sel.removeAllRanges();
+      sel.addRange(hitRange);
+    }
+    scheduleEditHereButton(0);
   }
 }
 
@@ -1225,6 +1388,8 @@ function runSearch({ keepPosition }) {
     if (target === 'editor') editor.revealRange(matches[s.current].start);
     else revealPreviewMatch(matches[s.current]);
   }
+  // 表示モードでは、今のヒットのそばに「コピー / ✎ 直す」を出す（ヒットが無くなれば隠す）
+  if (target === 'preview') scheduleEditHereButton(0);
 }
 
 // プレビューの DOM が変わったとき（再描画・コードの色付け）に索引とハイライトを作り直す
@@ -1270,6 +1435,7 @@ function moveMatch(delta) {
   } else {
     paintPreviewHits();
     revealPreviewMatch(m);
+    scheduleEditHereButton(0);
   }
   updateSearchCount();
   updateHitRulers();
@@ -1520,6 +1686,7 @@ function updatePreviewOnlyButtons(mode) {
 }
 
 function loadDocument(payload) {
+  imageRefresher.reset();
   applyDocMeta(payload);
   els.body.classList.remove('is-empty', 'is-loading');
   hideBanner();
@@ -1558,21 +1725,20 @@ function reloadDocument(payload) {
   else editor.scrollToLine(line);
   if (state.search.open) runSearch({ keepPosition: true });
   updateToc();
+  // 更新ボタン・F5: 画像も全部読み直す
+  if (payload.reason === 'manual') imageRefresher.reloadAll();
   showMessage('外部の変更を読み込みました');
 }
 
-/**
- * 上書き保存
- * @param {{skipDiffConfirm?: boolean}} [options] skipDiffConfirm: 変更点の確認画面から保存するとき（もう確認済み）
- */
-async function save(options) {
+/** 上書き保存 */
+async function save() {
   if (!state.doc || state.saving) return;
   if (!state.dirty) {
     showMessage('変更はありません');
     return;
   }
   // 設定「保存の前に変更点を確認する」: 差分を見せて、保存してよいか確かめる
-  if (appSettings.confirmDiffOnSave && !options?.skipDiffConfirm) {
+  if (appSettings.confirmDiffOnSave) {
     const answer = await diffDialog.open({
       title: '保存の前に変更点を確認',
       note: `「${state.doc.name}」に保存する変更です。`,
@@ -1832,7 +1998,7 @@ function applyAppSettings(next) {
   els.btnAutoReload.setAttribute('aria-pressed', String(s.autoReload));
   els.btnAutoReload.title = `自動再読み込み: ${s.autoReload ? 'オン' : 'オフ'}（ファイルが外部で変更されたら自動で読み直す）`;
   els.btnBreaks.setAttribute('aria-pressed', String(s.breaks));
-  els.btnBreaks.title = `改行で折り返す: ${s.breaks ? 'オン' : 'オフ'}（行末の半角スペース 2 つが無くても、改行で改行して表示）`;
+  els.btnBreaks.title = `改行で折り返す: ${s.breaks ? 'オン' : 'オフ'}（ソースの改行を、そのまま表示でも改行する。長い行を画面の端で折り返す設定ではありません）`;
   els.btnWidth.title = `表示幅: ${PREVIEW_WIDTH_LABELS[s.previewWidth] ?? '標準'}（プレビューの本文の幅）`;
   els.btnMarks.setAttribute('aria-pressed', String(s.changeMarks));
   els.btnMarks.title = `変更した行に印: ${s.changeMarks ? 'オン' : 'オフ'}（保存済みの内容から変更・追加・削除した行の横に印を出す）`;
@@ -2043,10 +2209,10 @@ window.addEventListener('keydown', (e) => {
   if (e.key === 'F3' && state.doc) return prevent(e, () => (state.search.open ? moveMatch(e.shiftKey ? -1 : 1) : openSearch()));
   if (e.key === 'Escape' && tocIsOverlay() && !els.toc.hidden) return prevent(e, () => setTocOpen(false));
   if (e.key === 'Escape' && state.search.open) return prevent(e, closeSearch);
-  if (e.key === 'Escape' && !editHereBtn.hidden) return prevent(e, hideEditHereButton);
+  if (e.key === 'Escape' && !selectionTools.hidden) return prevent(e, hideEditHereButton);
   if (e.key === 'F1' && !ctrl && !e.altKey) return prevent(e, () => shortcutsHelp.open());
   // 表示の文字を選んで Enter / F2 →「ここを直す」（入力欄・ボタン・リンクにフォーカスがあるときは、そちらの操作を優先）
-  if ((e.key === 'Enter' || e.key === 'F2') && !ctrl && !e.altKey && !e.shiftKey && canEditHere() && previewSelection()) {
+  if ((e.key === 'Enter' || e.key === 'F2') && !ctrl && !e.altKey && !e.shiftKey && canEditHere() && previewPick()) {
     const focused = shadow.activeElement ?? document.activeElement;
     if (e.key === 'F2' || !focused?.closest?.('a[href], button, input, textarea, select, summary')) return prevent(e, () => editHere());
   }
@@ -2188,20 +2354,16 @@ async function showExternalDiff() {
 }
 
 // 変更点の確認（編集 > 変更点を確認・Ctrl+D・ステータスバーの「● 未保存」）
+// 変更点を見るだけの画面（1.2.1 で保存ボタンを無くした。見るつもりで開いた直後の Enter で保存されてしまうため。
+// 保存は閉じてから Ctrl+S・保存ボタンで行う）
 async function showChanges() {
   if (!state.doc) return;
-  const answer = await diffDialog.open({
+  await diffDialog.open({
     title: '変更点の確認',
     note: `「${state.doc.name}」の保存済みの内容と、編集中の内容の差分です。`,
     sections: [{ heading: '保存済みの内容 → 編集中の内容', oldText: state.savedText, newText: editor.value }],
-    buttons: state.dirty
-      ? [
-          { label: '保存', value: 'save', primary: true },
-          { label: '閉じる', value: 'close' },
-        ]
-      : [{ label: '閉じる', value: 'close', primary: true }],
+    buttons: [{ label: '閉じる', value: 'close', primary: true }],
   });
-  if (answer === 'save') save({ skipDiffConfirm: true });
 }
 
 const diffDialog = createDiffDialog({ dialog: $('#diff-dialog') });
@@ -2247,6 +2409,7 @@ const shortcutsHelp = createShortcutsHelp({ dialog: $('#shortcuts-dialog') });
 els.stDirty.addEventListener('click', showChanges);
 els.stPos.addEventListener('click', openGoto);
 els.stLinks.addEventListener('click', nextBrokenLink);
+els.stSyntax.addEventListener('click', nextSyntaxIssue);
 
 els.body.dataset.mode = state.mode;
 updateTitle();

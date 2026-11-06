@@ -57,6 +57,8 @@ contextBridge.exposeInMainWorld('mvp', {
   widthMenu: () => ipcRenderer.send('ui:width-menu'),
   // プレビューの右クリックのメニュー（選択の有無・「ここを直す」が使えるか・リンク先）
   previewContextMenu: (info) => ipcRenderer.send('ui:preview-context-menu', info),
+  // コードブロックのコピーボタン（クリップボードへの書き込みは main で行う）
+  copyText: (text) => ipcRenderer.invoke('ui:copy-text', String(text)),
   // confirmed: 編集中の変更を破棄してよいことを確認済み（通知バナーの「再読み込み」など）
   reloadFromDisk: (confirmed = false) => ipcRenderer.invoke('doc:reload', { confirmed: Boolean(confirmed) }),
   openDialog: () => ipcRenderer.invoke('doc:open-dialog'),
@@ -68,6 +70,7 @@ contextBridge.exposeInMainWorld('mvp', {
   readDiskText: () => ipcRenderer.invoke('doc:read-disk'),
   // リンク切れの検出: file: の URL が指すファイルがあるか（真偽値の配列）
   checkFiles: (urls) => ipcRenderer.invoke('doc:check-files', Array.from(urls, String)),
+  statFiles: (urls) => ipcRenderer.invoke('doc:stat-files', Array.from(urls, String)),
   // ドロップされたファイルの実パス（Electron 32 以降は File.path が無いため）
   pathForFile: (file) => webUtils.getPathForFile(file),
 });
